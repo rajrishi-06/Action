@@ -13,12 +13,17 @@ export const Auth = () => {
   const handleGoogleLogin = async () => {
     try {
       setLoading(true);
-      const { error } = await supabase.auth.signInWithOAuth({
+      setError(null);
+      const { data, error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
+        options: {
+          redirectTo: window.location.origin,
+        }
       });
       if (error) throw error;
     } catch (error) {
-      setError(error.message);
+      console.error('Google login error:', error);
+      setError(error.message || 'Failed to sign in with Google. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -58,15 +63,22 @@ export const Auth = () => {
         className="bg-white dark:bg-gray-800 p-8 rounded-2xl shadow-xl max-w-md w-full border border-gray-100 dark:border-gray-700"
       >
         <div className="flex items-center justify-center gap-3 mb-8">
-          <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center">
-            <CheckCircle className="w-6 h-6 text-white" />
-          </div>
-          <h1 className="text-2xl font-bold text-gray-800 dark:text-white">TaskMaster</h1>
+          <img src="/logo.png" alt="Action Logo" className="w-12 h-12 object-contain rounded-full" />
+          <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-orange-500 bg-clip-text text-transparent" style={{ fontFamily: "'Poppins', sans-serif" }}>
+            Action
+          </h1>
         </div>
 
         <h2 className="text-xl font-semibold text-center mb-6 text-gray-700 dark:text-gray-200">
           {isSignUp ? 'Create an account' : 'Welcome back'}
         </h2>
+
+        {/* Google Sign-In Notice */}
+        <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-3 mb-4">
+          <p className="text-sm text-amber-800 dark:text-amber-200 text-center">
+            ⚠️ Google Sign-In is temporarily unavailable. Please use email authentication.
+          </p>
+        </div>
 
         {error && (
           <div className="bg-red-50 text-red-600 p-3 rounded-lg mb-4 text-sm">

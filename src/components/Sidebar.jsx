@@ -40,10 +40,10 @@ export const Sidebar = ({ currentView, setView, isOpen, onClose }) => {
         <X className="w-5 h-5" />
       </button>
       <div className="flex items-center gap-3 mb-10">
-        <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center">
-          <CheckCircle className="w-5 h-5 text-white" />
-        </div>
-        <h1 className="text-xl font-bold text-gray-800 dark:text-white">TaskMaster</h1>
+        <img src="/logo.png" alt="Action Logo" className="w-10 h-10 object-contain rounded-full" />
+        <h1 className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-orange-500 bg-clip-text text-transparent" style={{ fontFamily: "'Poppins', sans-serif" }}>
+          Action
+        </h1>
       </div>
 
       <nav className="space-y-2 flex-1">
