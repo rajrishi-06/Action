@@ -1,326 +1,549 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { parseTaskInput } from '../utils/taskParser';
-import { supabase } from '../utils/supabase';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from 'react';
+import { supabase } from '../lib/supabase';
+import { useAuth } from './AuthContext';
+import { useToast } from './ToastContext';
+import { initialTaskState, taskReducer } from '../lib/taskReducer';
+import { fromRow, isEmptyRow, toInsertRow, toRow } from '../lib/taskMapper';
+import { parseTaskInput, nextOccurrence } from '../lib/taskParser';
+import { smartScore } from '../lib/analytics';
+import { isOverdue, toDate } from '../lib/date';
+import { DEFAULT_PRIORITY, DEFAULT_STATUS, priorityWeight } from '../lib/taskModel';
 
-const TodoContext = createContext();
+const TodoContext = createContext(null);
 
-export const useTodo = () => useContext(TodoContext);
+export const SORT_OPTIONS = [
+  { id: 'smart', label: 'Smart' },
+  { id: 'due', label: 'Due date' },
+  { id: 'priority', label: 'Priority' },
+  { id: 'created', label: 'Recently added' },
+  { id: 'alphabetical', label: 'A–Z' },
+  { id: 'manual', label: 'Manual order' },
+];
 
-export const TodoProvider = ({ children }) => {
-  const [tasks, setTasks] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState('all'); // all, active, completed
-  const [searchQuery, setSearchQuery] = useState('');
+export const SCOPES = [
+  { id: 'today', label: 'Today' },
+  { id: 'upcoming', label: 'Upcoming' },
+  { id: 'all', label: 'All tasks' },
+  { id: 'overdue', label: 'Overdue' },
+  { id: 'completed', label: 'Completed' },
+];
 
-  useEffect(() => {
-    fetchTasks();
-  }, []);
+const DEFAULT_FILTERS = {
+  scope: 'all',
+  search: '',
+  priorities: [],
+  tags: [],
+  sort: 'smart',
+  showCompleted: false,
+};
 
-  const fetchTasks = async () => {
-    try {
-      setLoading(true);
-      const { data: { user } } = await supabase.auth.getUser();
-      
-      if (!user) {
-        setTasks([]);
-        setLoading(false);
-        return;
-      }
+/** Comparators for each sort mode. */
+const COMPARATORS = {
+  smart: (a, b) => smartScore(b) - smartScore(a),
+  due: (a, b) => {
+    const aDate = toDate(a.dueDate);
+    const bDate = toDate(b.dueDate);
+    // Undated tasks sink to the bottom rather than sorting as epoch zero.
+    if (!aDate && !bDate) return 0;
+    if (!aDate) return 1;
+    if (!bDate) return -1;
+    return aDate - bDate;
+  },
+  priority: (a, b) => priorityWeight(b.priority) - priorityWeight(a.priority),
+  created: (a, b) => (toDate(b.createdAt) ?? 0) - (toDate(a.createdAt) ?? 0),
+  alphabetical: (a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }),
+  manual: (a, b) => (a.position ?? 0) - (b.position ?? 0),
+};
 
-      const { data, error } = await supabase
-        .from('tasks')
-        .select('*')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
-
-      if (error) throw error;
-
-      const formattedTasks = data.map(t => ({
-        id: t.id,
-        title: t.title,
-        description: t.description,
-        completed: t.is_completed,
-        createdAt: new Date(t.created_at),
-        dueDate: t.due_date ? new Date(t.due_date) : null,
-        priority: t.priority,
-        tags: t.tags || [],
-        subtasks: t.subtasks || [],
-        estimatedTime: t.estimated_time,
-        actualTime: t.actual_time,
-        status: t.status
-      }));
-
-      setTasks(formattedTasks);
-    } catch (error) {
-      console.error('Error fetching tasks:', error);
-    } finally {
-      setLoading(false);
+function matchesScope(task, scope, now) {
+  switch (scope) {
+    case 'today': {
+      const due = toDate(task.dueDate);
+      return (
+        !task.completed &&
+        ((due && due <= new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59)) ||
+          task.status === 'today' ||
+          task.status === 'doing')
+      );
     }
-  };
+    case 'upcoming': {
+      const due = toDate(task.dueDate);
+      return Boolean(!task.completed && due && due > now);
+    }
+    case 'overdue':
+      return isOverdue(task);
+    case 'completed':
+      return task.completed;
+    case 'all':
+    default:
+      return true;
+  }
+}
 
-  const addTask = async (input) => {
-    const { text, dueDate, priority, tags } = parseTaskInput(input);
-    
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
+export function TodoProvider({ children }) {
+  const { userId, isAuthenticated, isLoading: authLoading } = useAuth();
+  const toast = useToast();
 
-    const newTask = {
-      user_id: user.id,
-      title: text,
-      is_completed: false,
-      created_at: new Date().toISOString(),
-      due_date: dueDate ? dueDate.toISOString() : null,
-      priority,
-      tags,
-      subtasks: []
+  const [state, dispatch] = useReducer(taskReducer, initialTaskState);
+  const [filters, setFilters] = useState(DEFAULT_FILTERS);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+
+  // Guards against a slow response from a previous user overwriting the
+  // current user's data after a fast account switch.
+  const requestId = useRef(0);
+
+  const fetchTasks = useCallback(async () => {
+    if (!supabase || !userId) {
+      dispatch({ type: 'reset' });
+      return;
+    }
+
+    const currentRequest = ++requestId.current;
+    dispatch({ type: 'load:start' });
+
+    const { data, error } = await supabase
+      .from('tasks')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+
+    if (currentRequest !== requestId.current) return;
+
+    if (error) {
+      dispatch({ type: 'load:error', error: error.message });
+      toast.error('Could not load your tasks', { description: error.message });
+      return;
+    }
+
+    dispatch({ type: 'load:success', tasks: data.map(fromRow) });
+  }, [userId, toast]);
+
+  // Refetch whenever the signed-in user changes — including the sign-in itself.
+  useEffect(() => {
+    if (authLoading) return;
+    fetchTasks();
+  }, [authLoading, fetchTasks]);
+
+  // Keep other tabs and devices in sync.
+  useEffect(() => {
+    if (!supabase || !userId) return undefined;
+
+    const channel = supabase
+      .channel(`tasks:${userId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'tasks', filter: `user_id=eq.${userId}` },
+        (payload) => {
+          if (payload.eventType === 'DELETE') {
+            dispatch({ type: 'remove', id: payload.old.id });
+          } else {
+            dispatch({ type: 'upsert:remote', task: fromRow(payload.new) });
+          }
+        },
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
     };
+  }, [userId]);
 
-    // Optimistic update
-    const tempId = Date.now().toString();
-    const optimisticTask = {
-      id: tempId,
-      title: text,
-      completed: false,
-      createdAt: new Date(),
-      dueDate,
-      priority,
-      tags,
-      subtasks: []
-    };
-    setTasks(prev => [optimisticTask, ...prev]);
+  /* ----------------------------- mutations ----------------------------- */
 
-    try {
+  const addTask = useCallback(
+    async (input, overrides = {}) => {
+      if (!userId) return null;
+
+      const parsed = typeof input === 'string' ? parseTaskInput(input) : input;
+      const draft = {
+        title: parsed.title?.trim(),
+        notes: parsed.notes ?? '',
+        priority: parsed.priority ?? DEFAULT_PRIORITY,
+        status: parsed.status ?? DEFAULT_STATUS,
+        dueDate: parsed.dueDate ?? null,
+        hasTime: parsed.hasTime ?? false,
+        tags: parsed.tags ?? [],
+        subtasks: parsed.subtasks ?? [],
+        estimateMinutes: parsed.estimateMinutes ?? null,
+        recurrence: parsed.recurrence ?? null,
+        ...overrides,
+      };
+
+      if (!draft.title) return null;
+
+      const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const optimistic = {
+        ...draft,
+        id: tempId,
+        completed: false,
+        completedAt: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        actualMinutes: null,
+        position: Date.now(),
+        pending: true,
+      };
+
+      dispatch({ type: 'add', task: optimistic });
+
       const { data, error } = await supabase
         .from('tasks')
-        .insert([newTask])
+        .insert(toInsertRow(draft, userId))
         .select()
         .single();
 
-      if (error) throw error;
-
-      // Replace optimistic task with real one
-      setTasks(prev => prev.map(t => t.id === tempId ? {
-        ...t,
-        id: data.id,
-        createdAt: new Date(data.created_at),
-        dueDate: data.due_date ? new Date(data.due_date) : null
-      } : t));
-
-    } catch (error) {
-      console.error('Error adding task:', error);
-      // Rollback
-      setTasks(prev => prev.filter(t => t.id !== tempId));
-    }
-  };
-
-  const toggleTask = async (id) => {
-    const task = tasks.find(t => t.id === id);
-    if (!task) return;
-
-    const wasCompleted = task.completed;
-    const isNowCompleted = !task.completed;
-
-    // Optimistic update
-    setTasks(prev => prev.map(t => 
-      t.id === id ? { ...t, completed: isNowCompleted } : t
-    ));
-
-    try {
-      const { error } = await supabase
-        .from('tasks')
-        .update({ is_completed: isNowCompleted })
-        .eq('id', id);
-
-      if (error) throw error;
-
-      // Award XP when completing a task
-      if (!wasCompleted && isNowCompleted) {
-        await awardXP(task);
+      if (error) {
+        dispatch({ type: 'remove', id: tempId });
+        toast.error('Could not save that task', { description: error.message });
+        return null;
       }
-    } catch (error) {
-      console.error('Error toggling task:', error);
-      // Rollback
-      setTasks(prev => prev.map(t => 
-        t.id === id ? { ...t, completed: task.completed } : t
-      ));
-    }
-  };
 
-  // Award XP and update achievements
-  const awardXP = async (task) => {
-    try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      const saved = fromRow(data);
+      dispatch({ type: 'replace', id: tempId, task: saved });
+      return saved;
+    },
+    [userId, toast],
+  );
 
-      // Calculate XP based on task priority
-      const xpMap = { urgent: 50, high: 30, medium: 20, low: 10 };
-      const xp = xpMap[task.priority] || 10;
+  const updateTask = useCallback(
+    async (id, patch, { silent = false } = {}) => {
+      const previous = state.items.find((task) => task.id === id);
+      if (!previous) return;
 
-      // Award XP
-      const { error } = await supabase.rpc('award_xp', {
-        p_user_id: user.id,
-        p_xp: xp
-      });
+      const row = toRow(patch);
+      if (isEmptyRow(row)) return;
+
+      dispatch({ type: 'update', id, patch });
+
+      const { error } = await supabase.from('tasks').update(row).eq('id', id);
 
       if (error) {
-        // If RPC doesn't exist, manually update
-        const { data: stats } = await supabase
-          .from('user_stats')
-          .select('*')
-          .eq('user_id', user.id)
-          .single();
-
-        if (stats) {
-          const newTotalXp = stats.total_xp + xp;
-          const newTasksCompleted = stats.tasks_completed + 1;
-          const today = new Date().toISOString().split('T')[0];
-          const lastActivity = stats.last_activity ? stats.last_activity.split('T')[0] : null;
-          
-          // Calculate streak
-          let newStreak = stats.current_streak;
-          const yesterday = new Date();
-          yesterday.setDate(yesterday.getDate() - 1);
-          const yesterdayStr = yesterday.toISOString().split('T')[0];
-
-          if (lastActivity === yesterdayStr) {
-            newStreak += 1;
-          } else if (lastActivity !== today) {
-            newStreak = 1;
-          }
-
-          const newLongestStreak = Math.max(stats.longest_streak, newStreak);
-
-          // Check for achievements
-          const newAchievements = [...(stats.achievements || [])];
-          
-          if (newTasksCompleted === 1 && !newAchievements.includes('first_task')) {
-            newAchievements.push('first_task');
-          }
-          if (newTasksCompleted === 10 && !newAchievements.includes('tasks_10')) {
-            newAchievements.push('tasks_10');
-          }
-          if (newTasksCompleted === 50 && !newAchievements.includes('tasks_50')) {
-            newAchievements.push('tasks_50');
-          }
-          if (newTasksCompleted === 100 && !newAchievements.includes('tasks_100')) {
-            newAchievements.push('tasks_100');
-          }
-          if (newTasksCompleted === 500 && !newAchievements.includes('tasks_500')) {
-            newAchievements.push('tasks_500');
-          }
-          
-          if (newStreak === 3 && !newAchievements.includes('streak_3')) {
-            newAchievements.push('streak_3');
-          }
-          if (newStreak === 7 && !newAchievements.includes('streak_7')) {
-            newAchievements.push('streak_7');
-          }
-          if (newStreak === 30 && !newAchievements.includes('streak_30')) {
-            newAchievements.push('streak_30');
-          }
-
-          await supabase
-            .from('user_stats')
-            .update({
-              total_xp: newTotalXp,
-              tasks_completed: newTasksCompleted,
-              current_streak: newStreak,
-              longest_streak: newLongestStreak,
-              last_activity: new Date().toISOString(),
-              achievements: newAchievements,
-            })
-            .eq('user_id', user.id);
-        }
+        // Roll back to exactly the fields we touched, leaving anything that
+        // changed concurrently alone.
+        const rollback = Object.fromEntries(Object.keys(patch).map((key) => [key, previous[key]]));
+        dispatch({ type: 'update', id, patch: rollback });
+        if (!silent) toast.error('Could not save that change', { description: error.message });
       }
-    } catch (error) {
-      console.error('Error awarding XP:', error);
-    }
-  };
+    },
+    [state.items, toast],
+  );
 
-  const deleteTask = async (id) => {
-    const task = tasks.find(t => t.id === id);
-    
-    // Optimistic update
-    setTasks(prev => prev.filter(t => t.id !== id));
+  /** Completing a recurring task schedules the next occurrence. */
+  const rollRecurrence = useCallback(
+    async (task) => {
+      const next = nextOccurrence(task.dueDate ?? new Date(), task.recurrence);
+      if (!next) return;
 
-    try {
-      const { error } = await supabase
-        .from('tasks')
-        .delete()
-        .eq('id', id);
+      await addTask({
+        title: task.title,
+        notes: task.notes,
+        priority: task.priority,
+        status: DEFAULT_STATUS,
+        dueDate: next,
+        hasTime: task.hasTime,
+        tags: task.tags,
+        estimateMinutes: task.estimateMinutes,
+        recurrence: task.recurrence,
+        // Reset the checklist so the repeat starts fresh.
+        subtasks: (task.subtasks ?? []).map((subtask) => ({ ...subtask, completed: false })),
+      });
+    },
+    [addTask],
+  );
 
-      if (error) throw error;
-    } catch (error) {
-      console.error('Error deleting task:', error);
-      // Rollback
-      if (task) setTasks(prev => [...prev, task]);
-    }
-  };
+  const toggleTask = useCallback(
+    async (id) => {
+      const task = state.items.find((item) => item.id === id);
+      if (!task) return;
 
-  const updateTask = async (id, updates) => {
-    // Optimistic update
-    setTasks(prev => prev.map(t => 
-      t.id === id ? { ...t, ...updates } : t
-    ));
+      const completed = !task.completed;
+      const patch = {
+        completed,
+        completedAt: completed ? new Date() : null,
+        status: completed ? 'done' : task.status === 'done' ? DEFAULT_STATUS : task.status,
+      };
 
-    try {
-      // Map frontend keys to DB keys if necessary
-      const dbUpdates = {};
-      if (updates.title !== undefined) dbUpdates.title = updates.title;
-      if (updates.completed !== undefined) dbUpdates.is_completed = updates.completed;
-      if (updates.priority !== undefined) dbUpdates.priority = updates.priority;
-      if (updates.tags !== undefined) dbUpdates.tags = updates.tags;
-      if (updates.dueDate !== undefined) dbUpdates.due_date = updates.dueDate;
+      await updateTask(id, patch);
 
-      const { error } = await supabase
-        .from('tasks')
-        .update(dbUpdates)
-        .eq('id', id);
+      if (completed && task.recurrence) await rollRecurrence(task);
+    },
+    [state.items, updateTask, rollRecurrence],
+  );
 
-      if (error) throw error;
-    } catch (error) {
-      console.error('Error updating task:', error);
-      // We might need a more complex rollback here, but for now we'll just log
-      fetchTasks(); // Re-sync with server
-    }
-  };
+  const deleteTask = useCallback(
+    async (id) => {
+      const index = state.items.findIndex((task) => task.id === id);
+      if (index === -1) return;
+      const task = state.items[index];
 
-  const getFilteredTasks = () => {
-    return tasks.filter(task => {
-      const matchesFilter = 
-        filter === 'all' ? true :
-        filter === 'active' ? !task.completed :
-        filter === 'completed' ? task.completed : true;
-      
-      const matchesSearch = task.title.toLowerCase().includes(searchQuery.toLowerCase());
-      
-      return matchesFilter && matchesSearch;
+      dispatch({ type: 'remove', id });
+
+      const { error } = await supabase.from('tasks').delete().eq('id', id);
+
+      if (error) {
+        dispatch({ type: 'restore', task, index });
+        toast.error('Could not delete that task', { description: error.message });
+        return;
+      }
+
+      toast.toast({
+        title: 'Task deleted',
+        description: task.title,
+        action: {
+          label: 'Undo',
+          // Re-insert rather than resurrect: the row is genuinely gone, so a
+          // new one is created carrying the same content.
+          onClick: async () => {
+            dispatch({ type: 'restore', task: { ...task, pending: true }, index });
+            const { data, error: restoreError } = await supabase
+              .from('tasks')
+              .insert(toInsertRow(task, userId))
+              .select()
+              .single();
+
+            if (restoreError) {
+              dispatch({ type: 'remove', id: task.id });
+              toast.error('Could not restore that task');
+              return;
+            }
+            dispatch({ type: 'replace', id: task.id, task: fromRow(data) });
+          },
+        },
+      });
+    },
+    [state.items, userId, toast],
+  );
+
+  const deleteMany = useCallback(
+    async (ids) => {
+      const entries = ids
+        .map((id) => ({ id, index: state.items.findIndex((task) => task.id === id) }))
+        .filter((entry) => entry.index !== -1)
+        .map((entry) => ({ ...entry, task: state.items[entry.index] }));
+
+      if (entries.length === 0) return;
+
+      dispatch({ type: 'remove:many', ids });
+      setSelectedIds(new Set());
+
+      const { error } = await supabase.from('tasks').delete().in('id', ids);
+
+      if (error) {
+        dispatch({ type: 'restore:many', entries });
+        toast.error('Could not delete those tasks', { description: error.message });
+        return;
+      }
+
+      toast.toast({
+        title: `${entries.length} tasks deleted`,
+        action: {
+          label: 'Undo',
+          onClick: async () => {
+            dispatch({ type: 'restore:many', entries });
+            const { data, error: restoreError } = await supabase
+              .from('tasks')
+              .insert(entries.map((entry) => toInsertRow(entry.task, userId)))
+              .select();
+
+            if (restoreError) {
+              dispatch({ type: 'remove:many', ids });
+              toast.error('Could not restore those tasks');
+              return;
+            }
+            data.forEach((row, index) =>
+              dispatch({ type: 'replace', id: entries[index].task.id, task: fromRow(row) }),
+            );
+          },
+        },
+      });
+    },
+    [state.items, userId, toast],
+  );
+
+  const updateMany = useCallback(
+    async (ids, patch) => {
+      const row = toRow(patch);
+      if (isEmptyRow(row) || ids.length === 0) return;
+
+      const previous = state.items.filter((task) => ids.includes(task.id));
+      dispatch({ type: 'update:many', updates: ids.map((id) => ({ id, patch })) });
+
+      const { error } = await supabase.from('tasks').update(row).in('id', ids);
+
+      if (error) {
+        dispatch({
+          type: 'update:many',
+          updates: previous.map((task) => ({
+            id: task.id,
+            patch: Object.fromEntries(Object.keys(patch).map((key) => [key, task[key]])),
+          })),
+        });
+        toast.error('Could not update those tasks', { description: error.message });
+      }
+    },
+    [state.items, toast],
+  );
+
+  /* --------------------------- subtask helpers -------------------------- */
+
+  const addSubtask = useCallback(
+    (taskId, title) => {
+      const task = state.items.find((item) => item.id === taskId);
+      if (!task || !title.trim()) return;
+      const subtasks = [
+        ...(task.subtasks ?? []),
+        { id: `sub-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, title: title.trim(), completed: false },
+      ];
+      updateTask(taskId, { subtasks });
+    },
+    [state.items, updateTask],
+  );
+
+  const toggleSubtask = useCallback(
+    (taskId, subtaskId) => {
+      const task = state.items.find((item) => item.id === taskId);
+      if (!task) return;
+      const subtasks = (task.subtasks ?? []).map((subtask) =>
+        subtask.id === subtaskId ? { ...subtask, completed: !subtask.completed } : subtask,
+      );
+      updateTask(taskId, { subtasks });
+    },
+    [state.items, updateTask],
+  );
+
+  const removeSubtask = useCallback(
+    (taskId, subtaskId) => {
+      const task = state.items.find((item) => item.id === taskId);
+      if (!task) return;
+      updateTask(taskId, { subtasks: (task.subtasks ?? []).filter((s) => s.id !== subtaskId) });
+    },
+    [state.items, updateTask],
+  );
+
+  /* ----------------------------- selection ------------------------------ */
+
+  const toggleSelected = useCallback((id) => {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
     });
-  };
+  }, []);
 
-  const getStats = () => {
-      const total = tasks.length;
-      const completed = tasks.filter(t => t.completed).length;
-      const completionRate = total === 0 ? 0 : Math.round((completed / total) * 100);
-      return { total, completed, completionRate };
-  };
+  const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
 
-  return (
-    <TodoContext.Provider value={{
-      tasks,
-      loading,
+  /* ------------------------------ derived ------------------------------- */
+
+  const allTags = useMemo(() => {
+    const counts = new Map();
+    for (const task of state.items) {
+      for (const tag of task.tags ?? []) counts.set(tag, (counts.get(tag) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([tag, count]) => ({ tag, count }))
+      .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+  }, [state.items]);
+
+  const visibleTasks = useMemo(() => {
+    const now = new Date();
+    const query = filters.search.trim().toLowerCase();
+
+    const filtered = state.items.filter((task) => {
+      if (!matchesScope(task, filters.scope, now)) return false;
+      if (filters.scope !== 'completed' && task.completed && !filters.showCompleted) return false;
+      if (filters.priorities.length && !filters.priorities.includes(task.priority)) return false;
+      if (filters.tags.length && !filters.tags.every((tag) => task.tags?.includes(tag))) return false;
+
+      if (query) {
+        const haystack = [task.title, task.notes, ...(task.tags ?? [])].join(' ').toLowerCase();
+        if (!haystack.includes(query)) return false;
+      }
+
+      return true;
+    });
+
+    const comparator = COMPARATORS[filters.sort] ?? COMPARATORS.smart;
+    // Completed tasks always sink, whatever the sort mode.
+    return filtered.sort((a, b) => {
+      if (a.completed !== b.completed) return a.completed ? 1 : -1;
+      return comparator(a, b);
+    });
+  }, [state.items, filters]);
+
+  const counts = useMemo(() => {
+    const now = new Date();
+    return {
+      all: state.items.filter((task) => !task.completed).length,
+      today: state.items.filter((task) => !task.completed && matchesScope(task, 'today', now)).length,
+      upcoming: state.items.filter((task) => matchesScope(task, 'upcoming', now)).length,
+      overdue: state.items.filter((task) => isOverdue(task)).length,
+      completed: state.items.filter((task) => task.completed).length,
+    };
+  }, [state.items]);
+
+  const setFilter = useCallback((patch) => {
+    setFilters((current) => ({ ...current, ...patch }));
+  }, []);
+
+  const resetFilters = useCallback(() => setFilters(DEFAULT_FILTERS), []);
+
+  const hasActiveFilters =
+    filters.search.trim() !== '' ||
+    filters.priorities.length > 0 ||
+    filters.tags.length > 0 ||
+    filters.showCompleted;
+
+  const value = useMemo(
+    () => ({
+      tasks: state.items,
+      visibleTasks,
+      counts,
+      allTags,
+      isLoading: state.status === 'loading' || authLoading,
+      isReady: state.status === 'ready',
+      error: state.error,
+      isAuthenticated,
+      filters,
+      setFilter,
+      resetFilters,
+      hasActiveFilters,
+      selectedIds,
+      toggleSelected,
+      clearSelection,
       addTask,
+      updateTask,
+      updateMany,
       toggleTask,
       deleteTask,
-      updateTask,
-      filter,
-      setFilter,
-      searchQuery,
-      setSearchQuery,
-      filteredTasks: getFilteredTasks(),
-      stats: getStats()
-    }}>
-      {children}
-    </TodoContext.Provider>
+      deleteMany,
+      addSubtask,
+      toggleSubtask,
+      removeSubtask,
+      refresh: fetchTasks,
+    }),
+    [
+      state.items, state.status, state.error, visibleTasks, counts, allTags, authLoading,
+      isAuthenticated, filters, setFilter, resetFilters, hasActiveFilters, selectedIds,
+      toggleSelected, clearSelection, addTask, updateTask, updateMany, toggleTask,
+      deleteTask, deleteMany, addSubtask, toggleSubtask, removeSubtask, fetchTasks,
+    ],
   );
-};
+
+  return <TodoContext.Provider value={value}>{children}</TodoContext.Provider>;
+}
+
+export function useTodo() {
+  const context = useContext(TodoContext);
+  if (!context) throw new Error('useTodo must be used inside a TodoProvider');
+  return context;
+}

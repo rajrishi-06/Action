@@ -1,149 +1,118 @@
-import React, { useState, useEffect } from 'react';
+import { Suspense, lazy } from 'react';
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { ThemeProvider } from './context/ThemeContext';
+import { ToastProvider } from './context/ToastContext';
 import { TodoProvider } from './context/TodoContext';
-import { Sidebar } from './components/Sidebar';
-import { TaskInput } from './components/TaskInput';
-import { TaskList } from './components/TaskList';
-import { KanbanBoard } from './components/KanbanBoard';
-import { Pomodoro } from './components/Pomodoro';
-import { Analytics } from './components/Analytics';
-import { CalendarView } from './components/CalendarView';
-import { CommandPalette } from './components/CommandPalette';
-import { ProductivityCoach } from './components/ProductivityCoach';
-import { AISuggestions } from './components/AISuggestions';
-import { Auth } from './components/Auth';
-import { supabase } from './utils/supabase';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { PomodoroProvider } from './context/PomodoroContext';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { Toaster } from './components/ui/Toaster';
+import { AppLayout } from './routes/AppLayout';
+import { TasksView } from './routes/TasksView';
+import { AuthView } from './routes/AuthView';
+import { SetupView } from './routes/SetupView';
+import { NotFound } from './routes/NotFound';
+import { Spinner } from './components/ui/primitives';
+import { isSupabaseConfigured } from './lib/env';
 
-function Dashboard() {
-  const [view, setView] = useState('list'); // list, kanban, focus, calendar, analytics
-  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+/**
+ * Heavier, less-visited views are split out of the initial bundle. The board
+ * pulls in the whole drag-and-drop library and the insights page pulls in the
+ * charts — neither should be paid for by someone who only opens Today.
+ */
+const BoardView = lazy(() => import('./routes/BoardView').then((m) => ({ default: m.BoardView })));
+const CalendarView = lazy(() => import('./routes/CalendarView').then((m) => ({ default: m.CalendarView })));
+const FocusView = lazy(() => import('./routes/FocusView').then((m) => ({ default: m.FocusView })));
+const AnalyticsView = lazy(() => import('./routes/AnalyticsView').then((m) => ({ default: m.AnalyticsView })));
+const SettingsView = lazy(() => import('./routes/SettingsView').then((m) => ({ default: m.SettingsView })));
 
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-        e.preventDefault();
-        setCommandPaletteOpen(true);
-      } else if (e.key === 'Escape') {
-        setCommandPaletteOpen(false);
-      }
-    };
-
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, []);
-
+function FullPageSpinner({ label = 'Loading' }) {
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 font-sans flex">
-      <Sidebar currentView={view} setView={setView} isOpen={sidebarOpen} onClose={() => setSidebarOpen(false)} />
-      <main className="md:ml-64 p-4 md:p-8 w-full max-w-6xl mx-auto">
-        {/* Mobile Menu Button */}
-        <button
-          onClick={() => setSidebarOpen(true)}
-          className="md:hidden fixed top-4 left-4 z-30 p-2 bg-white dark:bg-gray-800 rounded-lg shadow-lg"
-        >
-          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
-          </svg>
-        </button>
-        <header className="mb-8 flex flex-col md:flex-row justify-between items-start md:items-end gap-4 pt-12 md:pt-0">
-          <div>
-            <h2 className="text-2xl md:text-3xl font-bold text-gray-800 dark:text-white mb-2">Hello! 👋</h2>
-            <p className="text-sm md:text-base text-gray-500">Here's what's on your plate today.</p>
-          </div>
-          <div className="flex gap-1 bg-gray-100 dark:bg-gray-800 p-1 rounded-lg overflow-x-auto">
-            <button 
-              onClick={() => setView('list')}
-              className={`px-2 md:px-3 py-1.5 rounded-md text-xs md:text-sm font-medium transition-all whitespace-nowrap ${view === 'list' ? 'bg-white dark:bg-gray-700 shadow-sm text-indigo-600' : 'text-gray-500'}`}
-            >
-              List
-            </button>
-            <button 
-              onClick={() => setView('kanban')}
-              className={`px-2 md:px-3 py-1.5 rounded-md text-xs md:text-sm font-medium transition-all whitespace-nowrap ${view === 'kanban' ? 'bg-white dark:bg-gray-700 shadow-sm text-indigo-600' : 'text-gray-500'}`}
-            >
-              Kanban
-            </button>
-            <button 
-              onClick={() => setView('calendar')}
-              className={`px-2 md:px-3 py-1.5 rounded-md text-xs md:text-sm font-medium transition-all whitespace-nowrap ${view === 'calendar' ? 'bg-white dark:bg-gray-700 shadow-sm text-indigo-600' : 'text-gray-500'}`}
-            >
-              Calendar
-            </button>
-            <button 
-              onClick={() => setView('analytics')}
-              className={`px-2 md:px-3 py-1.5 rounded-md text-xs md:text-sm font-medium transition-all whitespace-nowrap ${view === 'analytics' ? 'bg-white dark:bg-gray-700 shadow-sm text-indigo-600' : 'text-gray-500'}`}
-            >
-              Analytics
-            </button>
-            <button 
-              onClick={() => setView('focus')}
-              className={`px-2 md:px-3 py-1.5 rounded-md text-xs md:text-sm font-medium transition-all whitespace-nowrap ${view === 'focus' ? 'bg-white dark:bg-gray-700 shadow-sm text-indigo-600' : 'text-gray-500'}`}
-            >
-              Focus
-            </button>
-          </div>
-        </header>
-        
-        {view === 'focus' && <Pomodoro />}
-        
-        {!['kanban', 'calendar', 'analytics'].includes(view) && (
-          <div>
-            <ProductivityCoach />
-            <AISuggestions />
-            <TaskInput />
-          </div>
-        )}
-        
-        {view === 'list' && <TaskList />}
-        {view === 'kanban' && <KanbanBoard />}
-        {view === 'calendar' && <CalendarView />}
-        {view === 'analytics' && <Analytics />}
-        {view === 'focus' && <TaskList />}
-      </main>
-
-      <CommandPalette 
-        isOpen={commandPaletteOpen} 
-        onClose={() => setCommandPaletteOpen(false)}
-        onNavigate={setView}
-      />
+    <div className="flex min-h-[50vh] items-center justify-center">
+      <Spinner className="h-6 w-6" />
+      <span className="sr-only">{label}</span>
     </div>
   );
 }
 
-function App() {
-  const [session, setSession] = useState(null);
-  const [loading, setLoading] = useState(true);
+/** Blocks the app routes until a session exists, preserving the target URL. */
+function RequireAuth({ children }) {
+  const { isAuthenticated, isLoading } = useAuth();
 
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setLoading(false);
-    });
+  if (isLoading) return <FullPageSpinner label="Checking your session" />;
+  if (!isAuthenticated) return <Navigate to="/login" replace />;
+  return children;
+}
 
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-    });
+function PublicOnly({ children }) {
+  const { isAuthenticated, isLoading } = useAuth();
 
-    return () => subscription.unsubscribe();
-  }, []);
+  if (isLoading) return <FullPageSpinner label="Checking your session" />;
+  if (isAuthenticated) return <Navigate to="/app/today" replace />;
+  return children;
+}
 
-  if (loading) {
-    return <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">Loading...</div>;
-  }
-
+function AppRoutes() {
   return (
-    <TodoProvider>
-      <Router>
-        <Routes>
-          <Route path="/login" element={!session ? <Auth /> : <Navigate to="/" />} />
-          <Route path="/" element={session ? <Dashboard /> : <Navigate to="/login" />} />
-        </Routes>
-      </Router>
-    </TodoProvider>
+    <Routes>
+      <Route path="/login" element={<PublicOnly><AuthView /></PublicOnly>} />
+
+      <Route
+        path="/app"
+        element={
+          <RequireAuth>
+            <PomodoroProvider>
+              <AppLayout />
+            </PomodoroProvider>
+          </RequireAuth>
+        }
+      >
+        <Route index element={<Navigate to="/app/today" replace />} />
+        <Route path="today" element={<TasksView scope="today" />} />
+        <Route path="upcoming" element={<TasksView scope="upcoming" />} />
+        <Route path="all" element={<TasksView scope="all" />} />
+        <Route path="completed" element={<TasksView scope="completed" />} />
+        <Route path="board" element={<BoardView />} />
+        <Route path="calendar" element={<CalendarView />} />
+        <Route path="focus" element={<FocusView />} />
+        <Route path="analytics" element={<AnalyticsView />} />
+        <Route path="settings" element={<SettingsView />} />
+      </Route>
+
+      {/* Keep old bookmarks working. */}
+      <Route path="/" element={<Navigate to="/app/today" replace />} />
+      <Route path="*" element={<NotFound />} />
+    </Routes>
   );
 }
 
-export default App;
+export default function App() {
+  // Without credentials there is nothing to authenticate against, so show the
+  // setup guide rather than a broken login form.
+  if (!isSupabaseConfigured) {
+    return (
+      <ThemeProvider>
+        <SetupView />
+      </ThemeProvider>
+    );
+  }
+
+  return (
+    <ErrorBoundary>
+      <ThemeProvider>
+        <ToastProvider>
+          <AuthProvider>
+            <TodoProvider>
+              <BrowserRouter>
+                <Suspense fallback={<FullPageSpinner />}>
+                  <AppRoutes />
+                </Suspense>
+              </BrowserRouter>
+              <Toaster />
+            </TodoProvider>
+          </AuthProvider>
+        </ToastProvider>
+      </ThemeProvider>
+    </ErrorBoundary>
+  );
+}
