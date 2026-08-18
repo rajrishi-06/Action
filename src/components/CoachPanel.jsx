@@ -93,11 +93,15 @@ export function CoachPanel({ onOpenTask }) {
     toast.success(`Moved ${insight.tasks.length} tasks to today`);
   };
 
-  if (!coaching && allInsights.length === 0) return null;
+  // A high-severity insight already states the problem in more detail, so the
+  // coaching line would just repeat it. Show one or the other, never both.
+  const showCoaching = Boolean(coaching) && !allInsights.some((i) => i.severity === 'high');
+
+  if (!showCoaching && allInsights.length === 0) return null;
 
   return (
     <section aria-label="Productivity insights" className="space-y-2">
-      {coaching && (
+      {showCoaching && (
         <p className="flex items-center gap-2 px-1 text-sm text-ink-muted">
           <Brain className="h-3.5 w-3.5 flex-shrink-0 text-brand-600 dark:text-brand-400" aria-hidden="true" />
           {coaching}
