@@ -6,6 +6,12 @@ import { TaskItem } from './TaskItem';
 import { Button } from '../ui/Button';
 import { EmptyState, Skeleton } from '../ui/primitives';
 
+/**
+ * Beyond this many visible rows, drop the layout animation. Measured concern
+ * rather than a guess at the exact cliff — see issue #9.
+ */
+const ANIMATION_LIMIT = 150;
+
 function TaskListSkeleton() {
   return (
     <div className="space-y-3" aria-hidden="true">
@@ -114,20 +120,33 @@ export function TaskList({ onOpenTask, selectable = false }) {
 
   const selectedList = [...selectedIds];
 
+  // Layout animation is the expensive part of a long list, and its value is
+  // lowest exactly when the list is long enough that you are scrolling rather
+  // than watching rows settle. Above this many rows, render them plainly and
+  // let the browser skip offscreen work.
+  const animate = visibleTasks.length <= ANIMATION_LIMIT;
+
+  const rows = visibleTasks.map((task) => (
+    <TaskItem
+      key={task.id}
+      task={task}
+      onOpen={onOpenTask}
+      selectable={selectable}
+      selected={selectedIds.has(task.id)}
+      onToggleSelected={toggleSelected}
+      animate={animate}
+    />
+  ));
+
   return (
-    <div className="space-y-3">
-      <AnimatePresence initial={false} mode="popLayout">
-        {visibleTasks.map((task) => (
-          <TaskItem
-            key={task.id}
-            task={task}
-            onOpen={onOpenTask}
-            selectable={selectable}
-            selected={selectedIds.has(task.id)}
-            onToggleSelected={toggleSelected}
-          />
-        ))}
-      </AnimatePresence>
+    <section aria-label="Task list" className="space-y-3">
+      {animate ? (
+        <AnimatePresence initial={false} mode="popLayout">
+          {rows}
+        </AnimatePresence>
+      ) : (
+        rows
+      )}
 
       <AnimatePresence>
         {selectedList.length > 0 && (
@@ -146,6 +165,6 @@ export function TaskList({ onOpenTask, selectable = false }) {
           />
         )}
       </AnimatePresence>
-    </div>
+    </section>
   );
 }

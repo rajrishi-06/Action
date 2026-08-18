@@ -13,10 +13,30 @@ import { useAuth } from './AuthContext';
 import { useToast } from './ToastContext';
 import { initialTaskState, taskReducer } from '../lib/taskReducer';
 import { fromRow, isEmptyRow, toInsertRow, toRow } from '../lib/taskMapper';
-import { parseTaskInput, nextOccurrence } from '../lib/taskParser';
+import { parseTaskInput, nextOccurrence, rollForward } from '../lib/taskParser';
 import { smartScore } from '../lib/analytics';
 import { isOverdue, toDate } from '../lib/date';
 import { DEFAULT_PRIORITY, DEFAULT_STATUS, priorityWeight } from '../lib/taskModel';
+import { drain, enqueue, isOnline, count as outboxCount } from '../lib/outbox';
+
+/**
+ * A failure the connection caused, rather than one the server chose.
+ *
+ * Only the former is worth queueing: a rejected write will be rejected again,
+ * and retrying it forever would block everything behind it.
+ */
+function isNetworkError(error) {
+  if (!isOnline()) return true;
+  if (!error) return false;
+  // PostgREST errors carry a code; a fetch that never reached it does not.
+  if (error.code && error.code !== '') return false;
+  return /fetch|network|connection|timeout/i.test(error.message ?? '');
+}
+
+/** Stable id for a task created before the server has seen it. */
+const newTaskId = () =>
+  (globalThis.crypto?.randomUUID?.() ??
+    `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`);
 
 const TodoContext = createContext(null);
 
@@ -36,6 +56,16 @@ export const SCOPES = [
   { id: 'overdue', label: 'Overdue' },
   { id: 'completed', label: 'Completed' },
 ];
+
+/**
+ * How much completed history to load. Must be >= the longest window charted in
+ * src/lib/analytics.js (currently the 182-day heatmap), or Insights would show
+ * a truncated picture without saying so.
+ */
+const HISTORY_DAYS = 182;
+
+/** A hard ceiling so one pathological account cannot stall the app. */
+const MAX_TASKS = 5000;
 
 const DEFAULT_FILTERS = {
   scope: 'all',
@@ -96,6 +126,7 @@ export function TodoProvider({ children }) {
   const [state, dispatch] = useReducer(taskReducer, initialTaskState);
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [queuedWrites, setQueuedWrites] = useState(0);
 
   // Guards against a slow response from a previous user overwriting the
   // current user's data after a fast account switch.
@@ -110,11 +141,20 @@ export function TodoProvider({ children }) {
     const currentRequest = ++requestId.current;
     dispatch({ type: 'load:start' });
 
+    // Open tasks are always loaded in full. Completed ones are bounded to the
+    // window Insights actually charts, because the archive only ever grows and
+    // nothing reads the older rows. `HISTORY_DAYS` must stay >= the longest
+    // range used in src/lib/analytics.js or the charts would quietly truncate.
+    const historyCutoff = new Date();
+    historyCutoff.setDate(historyCutoff.getDate() - HISTORY_DAYS);
+
     const { data, error } = await supabase
       .from('tasks')
       .select('*')
       .eq('user_id', userId)
-      .order('created_at', { ascending: false });
+      .or(`is_completed.eq.false,completed_at.gte.${historyCutoff.toISOString()}`)
+      .order('created_at', { ascending: false })
+      .limit(MAX_TASKS);
 
     if (currentRequest !== requestId.current) return;
 
@@ -124,7 +164,30 @@ export function TodoProvider({ children }) {
       return;
     }
 
-    dispatch({ type: 'load:success', tasks: data.map(fromRow) });
+    const tasks = data.map(fromRow);
+    dispatch({ type: 'load:success', tasks });
+
+    // A repeating task that was never completed used to sit overdue forever,
+    // because recurrence was only generated on completion. Catch those up now.
+    const stale = tasks
+      .filter((task) => !task.completed && task.recurrence && task.dueDate)
+      .map((task) => ({ task, next: rollForward(task.dueDate, task.recurrence) }))
+      .filter((entry) => entry.next);
+
+    if (stale.length > 0) {
+      dispatch({
+        type: 'update:many',
+        updates: stale.map(({ task, next }) => ({ id: task.id, patch: { dueDate: next } })),
+      });
+
+      // Fire and forget: the list already reads correctly, and a failure here
+      // just means the catch-up runs again on the next load.
+      await Promise.all(
+        stale.map(({ task, next }) =>
+          supabase.from('tasks').update({ due_date: next.toISOString() }).eq('id', task.id),
+        ),
+      );
+    }
   }, [userId, toast]);
 
   // Refetch whenever the signed-in user changes — including the sign-in itself.
@@ -157,6 +220,66 @@ export function TodoProvider({ children }) {
     };
   }, [userId]);
 
+  /**
+   * Replay queued writes, oldest first.
+   *
+   * Ordering matters: creating a task and then completing it must not replay
+   * the other way round, so `drain` stops at the first entry that still cannot
+   * be sent rather than skipping past it.
+   */
+  const flushOutbox = useCallback(async () => {
+    if (!supabase || !userId || !isOnline()) return;
+
+    const { sent, dropped, remaining } = await drain(userId, async (entry) => {
+      let error;
+
+      if (entry.kind === 'insert') {
+        ({ error } = await supabase.from('tasks').upsert(entry.payload, { onConflict: 'id' }));
+      } else if (entry.kind === 'update') {
+        ({ error } = await supabase.from('tasks').update(entry.payload).eq('id', entry.id));
+      } else if (entry.kind === 'delete') {
+        ({ error } = await supabase.from('tasks').delete().eq('id', entry.id));
+      } else {
+        // Unknown kind from an older version: drop rather than block the queue.
+        return { ok: false, retriable: false };
+      }
+
+      if (!error) return { ok: true };
+      return { ok: false, retriable: isNetworkError(error) };
+    });
+
+    setQueuedWrites(remaining);
+
+    if (sent > 0) {
+      toast.success(`Synced ${sent} change${sent === 1 ? '' : 's'}`);
+      // Re-read so the local copy matches what the server actually stored.
+      fetchTasks();
+    }
+    if (dropped > 0) {
+      toast.error(`${dropped} change${dropped === 1 ? '' : 's'} could not be saved`, {
+        description: 'They were rejected by the server and have been discarded.',
+      });
+    }
+  }, [userId, toast, fetchTasks]);
+
+  // Flush on reconnect, and once on load in case the last session ended offline.
+  useEffect(() => {
+    if (!userId) return undefined;
+
+    const sync = async () => {
+      if (isOnline()) {
+        await flushOutbox();
+      } else {
+        // Still offline: at least show how much is waiting.
+        setQueuedWrites(await outboxCount(userId).catch(() => 0));
+      }
+    };
+
+    sync();
+    window.addEventListener('online', sync);
+    return () => window.removeEventListener('online', sync);
+  }, [userId, flushOutbox]);
+
   /* ----------------------------- mutations ----------------------------- */
 
   const addTask = useCallback(
@@ -180,35 +303,41 @@ export function TodoProvider({ children }) {
 
       if (!draft.title) return null;
 
-      const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      // The id is generated here rather than by Postgres so the task has a
+      // stable identity even if it is created offline and only reaches the
+      // server later.
+      const id = newTaskId();
+      const row = toInsertRow({ ...draft, id }, userId);
       const optimistic = {
         ...draft,
-        id: tempId,
+        id,
         completed: false,
         completedAt: null,
         createdAt: new Date(),
         updatedAt: new Date(),
         actualMinutes: null,
-        position: Date.now(),
+        position: row.position,
         pending: true,
       };
 
       dispatch({ type: 'add', task: optimistic });
 
-      const { data, error } = await supabase
-        .from('tasks')
-        .insert(toInsertRow(draft, userId))
-        .select()
-        .single();
+      const { data, error } = await supabase.from('tasks').insert(row).select().single();
 
       if (error) {
-        dispatch({ type: 'remove', id: tempId });
+        if (isNetworkError(error)) {
+          // Keep it on screen and send it when the connection returns.
+          await enqueue({ kind: 'insert', payload: row, id, userId });
+          setQueuedWrites((current) => current + 1);
+          return optimistic;
+        }
+        dispatch({ type: 'remove', id });
         toast.error('Could not save that task', { description: error.message });
         return null;
       }
 
       const saved = fromRow(data);
-      dispatch({ type: 'replace', id: tempId, task: saved });
+      dispatch({ type: 'replace', id, task: saved });
       return saved;
     },
     [userId, toast],
@@ -224,17 +353,85 @@ export function TodoProvider({ children }) {
 
       dispatch({ type: 'update', id, patch });
 
-      const { error } = await supabase.from('tasks').update(row).eq('id', id);
+      // Optimistic concurrency: only write if the row still carries the
+      // `updated_at` we last saw. Without this the last writer silently wins and
+      // a change made on another device disappears with no signal.
+      let query = supabase.from('tasks').update(row).eq('id', id);
+      if (previous.updatedAt) {
+        query = query.eq('updated_at', previous.updatedAt.toISOString());
+      }
+
+      const { data, error } = await query.select().maybeSingle();
+
+      const rollback = () => {
+        const fields = Object.fromEntries(Object.keys(patch).map((key) => [key, previous[key]]));
+        dispatch({ type: 'update', id, patch: fields });
+      };
 
       if (error) {
-        // Roll back to exactly the fields we touched, leaving anything that
-        // changed concurrently alone.
-        const rollback = Object.fromEntries(Object.keys(patch).map((key) => [key, previous[key]]));
-        dispatch({ type: 'update', id, patch: rollback });
+        if (isNetworkError(error)) {
+          // Hold the optimistic state and replay the write when reconnected.
+          await enqueue({ kind: 'update', id, payload: row, userId });
+          setQueuedWrites((current) => current + 1);
+          return;
+        }
+        rollback();
         if (!silent) toast.error('Could not save that change', { description: error.message });
+        return;
       }
+
+      if (!data) {
+        // The precondition matched nothing: either the row is gone, or someone
+        // else changed it first. Re-read it and let the user decide.
+        const { data: current } = await supabase.from('tasks').select('*').eq('id', id).maybeSingle();
+
+        if (!current) {
+          dispatch({ type: 'remove', id });
+          if (!silent) toast.error('That task no longer exists', { description: 'It was deleted somewhere else.' });
+          return;
+        }
+
+        rollback();
+        dispatch({ type: 'replace', id, task: fromRow(current) });
+
+        if (!silent) {
+          toast.toast({
+            title: 'That task changed somewhere else',
+            description: 'Your edit was not applied, so the newer version is not lost.',
+            variant: 'error',
+            duration: 12_000,
+            action: {
+              label: 'Apply mine',
+              // A deliberate, explicit overwrite — the user has now been shown
+              // that someone else got there first. Written without the
+              // precondition, so it is unconditional by design.
+              onClick: async () => {
+                dispatch({ type: 'update', id, patch });
+                const { data: forced, error: forceError } = await supabase
+                  .from('tasks')
+                  .update(row)
+                  .eq('id', id)
+                  .select()
+                  .maybeSingle();
+
+                if (forceError || !forced) {
+                  rollback();
+                  toast.error('Could not apply your version');
+                  return;
+                }
+                dispatch({ type: 'replace', id, task: fromRow(forced) });
+              },
+            },
+          });
+        }
+        return;
+      }
+
+      // Keep the local `updated_at` in step, or the next write would fail its
+      // own precondition.
+      dispatch({ type: 'replace', id, task: fromRow(data) });
     },
-    [state.items, toast],
+    [state.items, toast, userId],
   );
 
   /** Completing a recurring task schedules the next occurrence. */
@@ -290,6 +487,11 @@ export function TodoProvider({ children }) {
       const { error } = await supabase.from('tasks').delete().eq('id', id);
 
       if (error) {
+        if (isNetworkError(error)) {
+          await enqueue({ kind: 'delete', id, userId });
+          setQueuedWrites((current) => current + 1);
+          return;
+        }
         dispatch({ type: 'restore', task, index });
         toast.error('Could not delete that task', { description: error.message });
         return;
@@ -391,6 +593,43 @@ export function TodoProvider({ children }) {
       }
     },
     [state.items, toast],
+  );
+
+  /**
+   * Write a different position to each of several tasks in one round trip.
+   *
+   * `updateMany` applies a single shared patch, which cannot express "each row
+   * gets its own value", so board renormalisation needs its own path.
+   */
+  const reorderTasks = useCallback(
+    async (entries) => {
+      if (!userId || entries.length === 0) return;
+
+      const previous = state.items.filter((task) => entries.some((entry) => entry.id === task.id));
+      dispatch({
+        type: 'update:many',
+        updates: entries.map(({ id, position }) => ({ id, patch: { position } })),
+      });
+
+      // Upsert rather than N updates: one request, and the rows already exist so
+      // nothing is created. user_id is included because RLS checks it on insert.
+      const { error } = await supabase.from('tasks').upsert(
+        entries.map(({ id, position }) => {
+          const task = state.items.find((item) => item.id === id);
+          return { ...toInsertRow(task, userId), id, position };
+        }),
+        { onConflict: 'id' },
+      );
+
+      if (error) {
+        dispatch({
+          type: 'update:many',
+          updates: previous.map((task) => ({ id: task.id, patch: { position: task.position } })),
+        });
+        toast.error('Could not save the new order', { description: error.message });
+      }
+    },
+    [state.items, userId, toast],
   );
 
   /* --------------------------- subtask helpers -------------------------- */
@@ -523,6 +762,7 @@ export function TodoProvider({ children }) {
       addTask,
       updateTask,
       updateMany,
+      reorderTasks,
       toggleTask,
       deleteTask,
       deleteMany,
@@ -530,12 +770,15 @@ export function TodoProvider({ children }) {
       toggleSubtask,
       removeSubtask,
       refresh: fetchTasks,
+      queuedWrites,
+      flushOutbox,
     }),
     [
       state.items, state.status, state.error, visibleTasks, counts, allTags, authLoading,
       isAuthenticated, filters, setFilter, resetFilters, hasActiveFilters, selectedIds,
-      toggleSelected, clearSelection, addTask, updateTask, updateMany, toggleTask,
-      deleteTask, deleteMany, addSubtask, toggleSubtask, removeSubtask, fetchTasks,
+      toggleSelected, clearSelection, addTask, updateTask, updateMany, reorderTasks,
+      toggleTask, deleteTask, deleteMany, addSubtask, toggleSubtask, removeSubtask, fetchTasks,
+      queuedWrites, flushOutbox,
     ],
   );
 

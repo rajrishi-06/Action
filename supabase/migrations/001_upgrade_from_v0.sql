@@ -55,10 +55,23 @@ update public.tasks set status = 'done'    where is_completed and status is dist
 update public.tasks set status = 'backlog' where not is_completed
   and (status is null or status not in ('backlog', 'today', 'doing'));
 
--- Best-effort backfill for completion timestamps. Rows completed before this
--- upgrade have no real completion time, so `updated_at` is the closest honest
--- approximation; the app tells the user these rows may be missing from
--- time-based charts.
+-- Completion timestamps for rows that predate this upgrade.
+--
+-- The old schema had no `completed_at`, so for already-completed tasks there is
+-- no record of when completion actually happened. There are two honest options
+-- and you should pick deliberately:
+--
+--   A) APPROXIMATE (default below). Use `updated_at`, which is usually the
+--      completion moment but drifts for any row edited afterwards. Your history
+--      looks populated, and is slightly wrong in ways you cannot see.
+--
+--   B) LEAVE NULL. Comment out the statement below. Old tasks are simply absent
+--      from the time-based charts rather than plotted in the wrong place. Your
+--      history looks emptier, and everything shown is true.
+--
+-- Option B is the better choice if you intend to act on the analytics. The app
+-- states on the Insights page that pre-upgrade data is approximate, and reads
+-- the marker set at the end of this file to say exactly where the line falls.
 update public.tasks
    set completed_at = coalesce(updated_at, created_at)
  where is_completed and completed_at is null;
@@ -76,3 +89,23 @@ update public.tasks t
 -- The old build stored a separate stats table; progress is now derived from the
 -- tasks themselves, so nothing reads it any more. Drop it when you are ready:
 --   drop table if exists public.user_stats;
+
+-- Record when this upgrade ran, so the app can tell the user precisely which
+-- part of their history is approximate rather than hand-waving at "older data".
+-- Safe to drop once you no longer care.
+create table if not exists public.app_meta (
+  key   text primary key,
+  value text not null
+);
+
+alter table public.app_meta enable row level security;
+
+drop policy if exists "app_meta is readable by any signed-in user" on public.app_meta;
+create policy "app_meta is readable by any signed-in user"
+  on public.app_meta for select
+  to authenticated
+  using (true);
+
+insert into public.app_meta (key, value)
+values ('completed_at_backfilled_at', now()::text)
+on conflict (key) do nothing;

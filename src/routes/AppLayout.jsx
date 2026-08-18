@@ -3,6 +3,7 @@ import { Outlet, useLocation } from 'react-router-dom';
 import { Menu, Search } from 'lucide-react';
 import { Sidebar } from '../components/layout/Sidebar';
 import { ThemeToggle } from '../components/layout/ThemeToggle';
+import { SyncStatus } from '../components/layout/SyncStatus';
 import { CommandPalette } from '../components/CommandPalette';
 import { ShortcutsDialog } from '../components/ShortcutsDialog';
 import { TaskDetail } from '../components/tasks/TaskDetail';
@@ -77,6 +78,7 @@ export function AppLayout() {
           <img src="/logo.png" alt="" width="24" height="24" className="h-6 w-6 rounded bg-white object-contain ring-1 ring-line" />
           <span className="font-display text-lg font-bold brand-gradient-text">Action</span>
           <div className="ml-auto flex items-center gap-1">
+            <SyncStatus />
             <IconButton label="Open command palette" onClick={() => setPaletteOpen(true)}>
               <Search className="h-4 w-4" />
             </IconButton>
@@ -90,6 +92,7 @@ export function AppLayout() {
         >
           {/* Desktop utility row */}
           <div className="mb-4 hidden items-center justify-end gap-2 md:flex">
+            <SyncStatus className="mr-auto" />
             <button
               type="button"
               onClick={() => setPaletteOpen(true)}

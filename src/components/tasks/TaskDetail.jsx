@@ -49,6 +49,19 @@ function TaskDetailBody({ task, onClose }) {
   const [newSubtask, setNewSubtask] = useState('');
   const [generating, setGenerating] = useState(false);
 
+  // While a field is untouched, follow changes arriving from another device
+  // rather than holding a stale draft that would overwrite them on blur.
+  // Adjusting state during render is React's documented answer to "derive from
+  // props without an effect"; it re-renders before the browser paints.
+  const [remote, setRemote] = useState({ title: task.title, notes: task.notes ?? '' });
+  const [dirty, setDirty] = useState({ title: false, notes: false });
+
+  if (remote.title !== task.title || remote.notes !== (task.notes ?? '')) {
+    setRemote({ title: task.title, notes: task.notes ?? '' });
+    if (!dirty.title) setTitle(task.title);
+    if (!dirty.notes) setNotes(task.notes ?? '');
+  }
+
   const subtasks = task.subtasks ?? [];
   const doneCount = subtasks.filter((subtask) => subtask.completed).length;
   const tagText = useMemo(() => (task.tags ?? []).join(', '), [task.tags]);
@@ -59,6 +72,7 @@ function TaskDetailBody({ task, onClose }) {
     const next = title.trim();
     if (next && next !== task.title) save({ title: next });
     else if (!next) setTitle(task.title);
+    setDirty((current) => ({ ...current, title: false }));
   };
 
   const commitTags = (value) => {

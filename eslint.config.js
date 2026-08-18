@@ -59,4 +59,15 @@ export default defineConfig([
     files: ['*.config.js', 'scripts/**'],
     languageOptions: { globals: globals.node },
   },
+  {
+    // Playwright specs run in Node, not the browser, and its `use` fixture
+    // callback is not a React hook despite the name.
+    files: ['e2e/**/*.js', 'playwright.config.js', 'api/**/*.js'],
+    languageOptions: { globals: { ...globals.node, ...globals.browser } },
+    rules: {
+      'react-hooks/rules-of-hooks': 'off',
+      'react-refresh/only-export-components': 'off',
+      'no-console': 'off',
+    },
+  },
 ]);

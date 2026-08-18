@@ -2,7 +2,14 @@
   command = "npm run build"
   publish = "dist"
 
-# Single-page app: every unknown path renders the client router.
+# Serverless functions must be matched before the SPA catch-all, or /api/ai
+# would render index.html instead of running.
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
+
+# Single-page app: every other unknown path renders the client router.
 [[redirects]]
   from = "/*"
   to = "/index.html"

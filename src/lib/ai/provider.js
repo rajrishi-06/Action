@@ -1,4 +1,5 @@
 import { env } from '../env';
+import { supabase } from '../supabase';
 
 /**
  * AI transport.
@@ -54,9 +55,17 @@ export async function complete(prompt, { signal, maxOutputTokens = 512 } = {}) {
 
   try {
     if (AI_MODE === 'proxy') {
+      // The proxy verifies this token before spending your API quota, so it is
+      // not an open relay for anyone who finds the URL.
+      const session = (await supabase?.auth.getSession())?.data?.session;
+      const accessToken = session?.access_token;
+
       const response = await fetchWithTimeout(env.aiProxyUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+        },
         body: JSON.stringify({ prompt, maxOutputTokens }),
         signal,
       });
