@@ -31,6 +31,7 @@ export const TaskItem = memo(function TaskItem({
   selected = false,
   onToggleSelected,
   dense = false,
+  animate = true,
 }) {
   const { toggleTask, deleteTask, updateTask } = useTodo();
   const [editing, setEditing] = useState(false);
@@ -69,13 +70,23 @@ export const TaskItem = memo(function TaskItem({
     }
   };
 
+  // A long list drops the animation entirely: `content-visibility` then lets the
+  // browser skip layout and paint for offscreen rows, which a motion component
+  // with a layout animation cannot do.
+  const Row = animate ? motion.div : 'div';
+  const motionProps = animate
+    ? {
+        layout: 'position',
+        initial: { opacity: 0, y: 8 },
+        animate: { opacity: 1, y: 0 },
+        exit: { opacity: 0, height: 0, marginBottom: 0, transition: { duration: 0.15 } },
+        transition: { duration: 0.2, ease: [0.16, 1, 0.3, 1] },
+      }
+    : { style: { contentVisibility: 'auto', containIntrinsicSize: 'auto 76px' } };
+
   return (
-    <motion.div
-      layout="position"
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, height: 0, marginBottom: 0, transition: { duration: 0.15 } }}
-      transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+    <Row
+      {...motionProps}
       className={cn(
         'group relative flex items-start gap-3 rounded-xl border border-l-[3px] border-line bg-surface',
         'shadow-card transition-shadow hover:shadow-card-hover',
@@ -221,6 +232,6 @@ export const TaskItem = memo(function TaskItem({
           <ChevronRight className="h-4 w-4" />
         </IconButton>
       </div>
-    </motion.div>
+    </Row>
   );
 });

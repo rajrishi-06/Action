@@ -11,6 +11,9 @@ import { ThroughputChart } from '../components/charts/ThroughputChart';
 import { ContributionHeatmap } from '../components/charts/ContributionHeatmap';
 import { BarList } from '../components/charts/BarList';
 import { EmptyState } from '../components/ui/primitives';
+import { useAsyncResource } from '../hooks/useAsyncResource';
+import { supabase } from '../lib/supabase';
+import { format } from 'date-fns';
 
 const hourLabel = (hour) => {
   if (hour === 0) return '12 AM';
@@ -28,6 +31,20 @@ const hourLabel = (hour) => {
  */
 export function AnalyticsView() {
   const { tasks, isLoading } = useTodo();
+
+  // If this database was upgraded from an older schema, completion timestamps
+  // before that moment were backfilled from `updated_at` and are approximate.
+  // Naming the exact date is more useful than a vague warning — and when the
+  // marker is absent (a fresh install, or the table was dropped) the caveat
+  // does not appear at all, because it does not apply.
+  const { data: backfilledAt } = useAsyncResource(async () => {
+    const { data } = await supabase
+      .from('app_meta')
+      .select('value')
+      .eq('key', 'completed_at_backfilled_at')
+      .maybeSingle();
+    return data?.value ? new Date(data.value) : null;
+  }, []);
 
   const stats = useMemo(() => summarise(tasks), [tasks]);
   const heatmap = useMemo(() => completionHeatmap(tasks, 182), [tasks]);
@@ -158,11 +175,17 @@ export function AnalyticsView() {
         />
       )}
 
-      <p className="flex items-center gap-1.5 px-1 text-xs text-ink-subtle">
-        <Clock className="h-3 w-3" aria-hidden="true" />
-        Tasks completed before this version was installed have no completion timestamp and will
-        not appear in the time-based charts.
-      </p>
+      {backfilledAt && !Number.isNaN(backfilledAt.getTime()) && (
+        <p className="flex items-start gap-1.5 px-1 text-xs text-ink-subtle">
+          <Clock className="mt-0.5 h-3 w-3 flex-shrink-0" aria-hidden="true" />
+          <span>
+            Tasks completed before {format(backfilledAt, 'd MMMM yyyy')} were finished under an
+            older version that did not record completion times. Their timestamps were estimated
+            from when the task was last edited, so the charts are approximate before that date and
+            exact after it.
+          </span>
+        </p>
+      )}
     </div>
   );
 }

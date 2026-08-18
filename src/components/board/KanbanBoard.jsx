@@ -22,6 +22,7 @@ import { useTodo } from '../../context/TodoContext';
 import { STATUSES, STATUS_META, PRIORITY_META } from '../../lib/taskModel';
 import { formatDueShort, isOverdue } from '../../lib/date';
 import { cn } from '../../lib/cn';
+import { positionBetween, renormalise } from '../../lib/ordering';
 import { TaskCheckbox } from '../tasks/TaskCheckbox';
 import { Button } from '../ui/Button';
 
@@ -150,26 +151,8 @@ function BoardColumn({ status, tasks, onOpen, onQuickAdd }) {
   );
 }
 
-const POSITION_GAP = 1000;
-
-/**
- * Fractional index for a card dropped at `index` in `list`.
- *
- * Only the moved card is written, rather than renumbering the whole column —
- * one round trip instead of N, and no write amplification as a board grows.
- */
-function positionBetween(list, index) {
-  const before = list[index - 1]?.position;
-  const after = list[index + 1]?.position;
-
-  if (before === undefined && after === undefined) return POSITION_GAP;
-  if (before === undefined) return after - POSITION_GAP;
-  if (after === undefined) return before + POSITION_GAP;
-  return (before + after) / 2;
-}
-
 export function KanbanBoard({ onOpenTask, onQuickAdd }) {
-  const { visibleTasks, updateTask } = useTodo();
+  const { visibleTasks, updateTask, reorderTasks } = useTodo();
   const [activeId, setActiveId] = useState(null);
 
   const sensors = useSensors(
@@ -213,7 +196,18 @@ export function KanbanBoard({ onOpenTask, onQuickAdd }) {
       if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) return;
 
       const reordered = arrayMove(items, oldIndex, newIndex);
-      updateTask(active.id, { position: positionBetween(reordered, newIndex) }, { silent: true });
+      const { position, needsRenormalise } = positionBetween(reordered, newIndex);
+
+      // Repeated drops into the same gap eventually exhaust float precision.
+      // When that point is reached, rewrite the column onto clean spacing
+      // instead of persisting a position that cannot be told apart from its
+      // neighbour's.
+      if (needsRenormalise) {
+        reorderTasks(renormalise(reordered));
+        return;
+      }
+
+      updateTask(active.id, { position }, { silent: true });
       return;
     }
 
@@ -223,14 +217,20 @@ export function KanbanBoard({ onOpenTask, onQuickAdd }) {
     const target = columns[to];
     const overIndex = target.findIndex((task) => task.id === over.id);
     const insertAt = overIndex === -1 ? target.length : overIndex;
-    const withTask = [...target.slice(0, insertAt), active, ...target.slice(insertAt)];
+    const moved = visibleTasks.find((task) => task.id === active.id);
+    const withTask = [...target.slice(0, insertAt), moved, ...target.slice(insertAt)];
+    const { position, needsRenormalise } = positionBetween(withTask, insertAt);
 
     updateTask(active.id, {
       status: to,
-      position: positionBetween(withTask, insertAt),
+      position,
       completed,
       completedAt: completed ? new Date() : null,
     });
+
+    if (needsRenormalise) {
+      reorderTasks(renormalise(withTask.map((task) => (task.id === active.id ? { ...task, position } : task))));
+    }
   };
 
   return (

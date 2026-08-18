@@ -88,3 +88,14 @@ describe('toInsertRow', () => {
     expect(row.status).toBe('backlog');
   });
 });
+
+describe('toInsertRow — client-generated ids', () => {
+  it('includes an id when the client supplies one', () => {
+    const row = toInsertRow({ id: 'client-uuid', title: 'New' }, 'user-1');
+    expect(row.id).toBe('client-uuid');
+  });
+
+  it('omits the id entirely when there is none, letting Postgres generate it', () => {
+    expect(toInsertRow({ title: 'New' }, 'user-1')).not.toHaveProperty('id');
+  });
+});

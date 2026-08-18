@@ -34,6 +34,18 @@ That runs lint, tests and a production build — the same gate CI applies.
 - **Every interactive element is a real control with an accessible name.** Icon
   buttons use `IconButton`, which requires a `label`. `jsx-a11y` runs in CI.
 
+### Things that are easy to get subtly wrong
+
+- **Writes must carry an `updated_at` precondition.** `updateTask` only applies a
+  change if the row still looks the way it did when read. Bypassing that
+  reintroduces silent data loss when two devices edit the same task.
+- **Board positions are fractional.** Use `positionBetween` from
+  `src/lib/ordering.js` and honour its `needsRenormalise` flag — repeated drops
+  into one gap eventually run out of float precision.
+- **Offline writes go to the outbox, not the floor.** A mutation that fails for a
+  network reason is queued in `src/lib/outbox.js` and replayed in order. Only a
+  failure the *server* chose should roll back.
+
 ## Tests
 
 Vitest with Testing Library. Aim for behaviour, not implementation:
@@ -47,6 +59,19 @@ expect(wrapper.state.isChecked).toBe(false);
 ```
 
 Bug fixes should come with a test that fails without the fix.
+
+Three suites, with different requirements:
+
+| Command | Needs | Covers |
+|---|---|---|
+| `npm run test` | nothing | Pure logic and components |
+| `npm run test:e2e` | nothing | UI flows against a stubbed backend |
+| `E2E_LIVE=1 npm run test:e2e` | a real project | Auth, RLS, real persistence |
+| `npm run verify:supabase` | a real project | Schema, policies, triggers, constraints |
+
+The first two run in CI. The live ones need credentials, so run them yourself
+before trusting a schema change — RLS is the only thing protecting user data and
+nothing else exercises it.
 
 ## Adding a chart
 

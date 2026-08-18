@@ -403,3 +403,36 @@ export function nextOccurrence(date, recurrence) {
       return null;
   }
 }
+
+/**
+ * Advance a repeating task's due date past `now`.
+ *
+ * Recurrence used to be generated only on completion, so a repeating task you
+ * skipped simply sat there overdue — the wrong failure mode for a feature whose
+ * whole point is habits you keep imperfectly.
+ *
+ * This rolls forward rather than materialising every missed occurrence: for
+ * personal habits, ten overdue copies of "Journal" is noise, and the streak data
+ * in Insights already carries the "did you actually do it" story.
+ *
+ * @returns {Date|null} The next due date, or null when nothing needs to change.
+ */
+export function rollForward(dueDate, recurrence, now = new Date()) {
+  if (!recurrence) return null;
+
+  const start = dueDate ? new Date(dueDate) : null;
+  if (!start || Number.isNaN(start.getTime())) return null;
+  if (start.getTime() > now.getTime()) return null;
+
+  let next = start;
+  // Bounded so a corrupt rule can never spin forever. 4000 daily steps is over
+  // a decade, far past any real gap.
+  for (let step = 0; step < 4000; step += 1) {
+    const candidate = nextOccurrence(next, recurrence);
+    if (!candidate) return null;
+    next = candidate;
+    if (next.getTime() > now.getTime()) return next;
+  }
+
+  return null;
+}

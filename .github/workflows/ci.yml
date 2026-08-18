@@ -47,3 +47,40 @@ jobs:
           name: dist
           path: dist
           retention-days: 7
+
+  e2e:
+    name: End-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # A browser suite is slower and flakier than unit tests, so it runs
+    # separately rather than blocking the fast lint/test feedback.
+    needs: verify
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run end-to-end tests
+        # Only the stubbed suite runs here. The live suite needs a real project
+        # and is opted into with E2E_LIVE=1 — see e2e/live.spec.js.
+        run: npx playwright test e2e/app.spec.js
+        env:
+          VITE_SUPABASE_URL: https://example.supabase.co
+          VITE_SUPABASE_ANON_KEY: ci-placeholder-key
+
+      - name: Upload the report when something fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report
+          retention-days: 7

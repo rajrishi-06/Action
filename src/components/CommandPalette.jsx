@@ -145,7 +145,11 @@ function PaletteDialog({ onClose }) {
           }]
         : [];
 
-    return [...createOption, ...matchedTasks, ...matchedCommands];
+    // "Create" ranks last, not first. Typing a command name and pressing Enter
+    // should run that command — creating a task called "insights" because the
+    // create option happened to sit at the top is a surprising way to lose a
+    // keystroke. It stays one arrow-key away.
+    return [...matchedTasks, ...matchedCommands, ...createOption];
   }, [query, commands, tasks, addTask, toggleTask, toast]);
 
   // Keep the selection inside the result list as it shrinks.

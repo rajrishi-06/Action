@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseTaskInput, nextOccurrence } from './taskParser';
+import { parseTaskInput, nextOccurrence, rollForward } from './taskParser';
 
 // A fixed clock: Wednesday 2026-03-11, 10:00 local time.
 const now = new Date(2026, 2, 11, 10, 0, 0, 0);
@@ -146,5 +146,60 @@ describe('nextOccurrence', () => {
 
   it('returns null for an unknown rule', () => {
     expect(nextOccurrence(new Date(), 'never')).toBeNull();
+  });
+});
+
+describe('rollForward', () => {
+  const monday = new Date(2026, 2, 9, 9, 0, 0, 0); // Monday 9 March 2026
+
+  it('advances a skipped daily task past today', () => {
+    const missed = new Date(2026, 2, 1, 9, 0, 0, 0);
+    const next = rollForward(missed, 'daily', monday);
+    expect(next.getTime()).toBeGreaterThan(monday.getTime());
+    expect(next.getDate()).toBe(10);
+  });
+
+  it('preserves the time of day while rolling forward', () => {
+    const missed = new Date(2026, 2, 1, 18, 30, 0, 0);
+    const next = rollForward(missed, 'daily', monday);
+    expect(next.getHours()).toBe(18);
+    expect(next.getMinutes()).toBe(30);
+  });
+
+  it('keeps a weekly task on its original weekday', () => {
+    // A Wednesday, three weeks stale.
+    const missed = new Date(2026, 1, 18, 9, 0, 0, 0);
+    const next = rollForward(missed, 'weekly', monday);
+    expect(next.getDay()).toBe(3);
+    expect(next.getTime()).toBeGreaterThan(monday.getTime());
+  });
+
+  it('never lands a weekday rule on a weekend', () => {
+    const missed = new Date(2026, 1, 2, 9, 0, 0, 0);
+    const next = rollForward(missed, 'weekdays', monday);
+    expect([0, 6]).not.toContain(next.getDay());
+  });
+
+  it('leaves a future occurrence alone', () => {
+    const future = new Date(2026, 2, 20, 9, 0, 0, 0);
+    expect(rollForward(future, 'daily', monday)).toBeNull();
+  });
+
+  it('does nothing without a recurrence rule', () => {
+    expect(rollForward(new Date(2026, 2, 1), null, monday)).toBeNull();
+  });
+
+  it('does nothing without a due date', () => {
+    expect(rollForward(null, 'daily', monday)).toBeNull();
+  });
+
+  it('terminates on an unknown rule rather than looping', () => {
+    expect(rollForward(new Date(2026, 2, 1), 'fortnightly', monday)).toBeNull();
+  });
+
+  it('handles a gap of years without hanging', () => {
+    const ancient = new Date(2020, 0, 1, 9, 0, 0, 0);
+    const next = rollForward(ancient, 'daily', monday);
+    expect(next.getTime()).toBeGreaterThan(monday.getTime());
   });
 });

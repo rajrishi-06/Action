@@ -28,3 +28,27 @@ export function useMediaQuery(query) {
 
 export const usePrefersReducedMotion = () => useMediaQuery('(prefers-reduced-motion: reduce)');
 export const usePrefersDark = () => useMediaQuery('(prefers-color-scheme: dark)');
+
+/**
+ * Whether the browser believes it has a connection.
+ *
+ * `navigator.onLine` only reports whether a network interface is up — it says
+ * nothing about whether requests actually succeed — so treat it as a hint for
+ * wording, never as proof. The queue length is the fact.
+ */
+export function useOnline() {
+  const subscribe = useCallback((onChange) => {
+    window.addEventListener('online', onChange);
+    window.addEventListener('offline', onChange);
+    return () => {
+      window.removeEventListener('online', onChange);
+      window.removeEventListener('offline', onChange);
+    };
+  }, []);
+
+  return useSyncExternalStore(
+    subscribe,
+    () => navigator.onLine !== false,
+    () => true,
+  );
+}

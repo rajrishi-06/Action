@@ -88,9 +88,17 @@ export function isEmptyRow(row) {
   return Object.keys(row).length === 0;
 }
 
-/** Build the insert payload for a brand-new task. */
+/**
+ * Build the insert payload for a brand-new task.
+ *
+ * The id is generated on the client rather than by Postgres. That matters for
+ * offline creation: a task queued while disconnected needs a stable identity
+ * immediately, so later edits to it can be queued against the same row and
+ * replayed in order once the connection returns.
+ */
 export function toInsertRow(task, userId) {
   return {
+    ...(task.id ? { id: task.id } : {}),
     user_id: userId,
     title: task.title,
     notes: task.notes ?? '',

@@ -41,9 +41,13 @@ commands. `/` jumps to search, `?` lists every shortcut, `Space` completes the
 focused task, `E` renames it inline.
 
 **AI where it helps, rules where it doesn't.** Task breakdown, tagging and time
-estimates work with no AI account at all, using the built-in playbook. Point
-`VITE_AI_PROXY_URL` at an endpoint you control and the same features get
-model-backed suggestions instead.
+estimates work with no AI account at all, using the built-in playbook. Deploy the
+included proxy (`api/ai.js`) and the same features get model-backed suggestions
+instead.
+
+**Works offline.** Writes made without a connection are queued in IndexedDB and
+replayed in order when it returns, with a visible count of what is still
+waiting — never a silent failure.
 
 ---
 
@@ -129,46 +133,66 @@ readable by anyone who opens devtools. `VITE_GEMINI_API_KEY` is therefore
 **ignored in production builds**, and the Settings screen says so explicitly if
 one is present.
 
-To ship AI features, put the key behind an endpoint you control and set
-`VITE_AI_PROXY_URL`. The proxy receives `POST { prompt, maxOutputTokens }` and
-should return `{ text }`. A minimal Vercel function:
+To ship AI features, put the key behind an endpoint you control. A working proxy
+is included at [`api/ai.js`](api/ai.js) — it verifies the caller's Supabase
+session so it is not an open relay for your quota, rate-limits per user, times
+out before the client does, and logs no prompts.
 
-```js
-// api/ai.js
-export default async function handler(req, res) {
-  const { prompt, maxOutputTokens = 512 } = req.body;
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.4, maxOutputTokens },
-      }),
-    },
-  );
-  const data = await response.json();
-  res.json({ text: data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '' });
-}
+Deploy it with the app (Vercel and Netlify routing are already configured), then
+set on the **server**, not as `VITE_` variables:
+
+```
+GEMINI_API_KEY=...        the real key
+SUPABASE_URL=...          used to verify the caller
+SUPABASE_ANON_KEY=...
 ```
 
-Without either variable, every AI-labelled feature still works — it just uses
-the local rules in `src/lib/ai/heuristics.js`.
+and in the client build:
+
+```
+VITE_AI_PROXY_URL=https://your-app.example.com/api/ai
+```
+
+Without it, every AI-labelled feature still works — it just uses the local rules
+in `src/lib/ai/heuristics.js`.
 
 ---
 
 ## Scripts
 
 ```bash
-npm run dev        # dev server with hot reload
-npm run build      # production build into dist/
-npm run preview    # serve the production build locally
-npm run lint       # eslint, including react-hooks and jsx-a11y
-npm run test       # vitest
-npm run test:watch # vitest in watch mode
-npm run coverage   # coverage report
-npm run check      # lint + test + build, the same gate CI runs
+npm run dev              # dev server with hot reload
+npm run build            # production build into dist/
+npm run preview          # serve the production build locally
+npm run lint             # eslint, including react-hooks and jsx-a11y
+npm run test             # vitest
+npm run test:watch       # vitest in watch mode
+npm run coverage         # coverage report
+npm run check            # lint + test + build, the same gate CI runs
+
+npm run test:e2e         # Playwright, stubbed backend — needs no credentials
+npm run verify:supabase  # assert a live project's schema, RLS and triggers
+```
+
+### Verifying a live database
+
+Row Level Security is the only thing protecting your data — the publishable key
+is designed to be public, which is safe *provided* the policies are right. After
+running the schema, check them:
+
+```bash
+npm run verify:supabase
+```
+
+It creates two throwaway users, asserts each cannot read, update, delete or forge
+the other's rows, exercises the write trigger and the column constraints, then
+cleans up. Email confirmation must be off for the run, or sign-up returns no
+session to test with.
+
+To run the end-to-end suite against a real project as well:
+
+```bash
+E2E_LIVE=1 npm run test:e2e
 ```
 
 ---
@@ -182,6 +206,8 @@ src/
 │   ├── analytics.js      streaks, throughput, heatmaps
 │   ├── taskMapper.js     database row ↔ UI task
 │   ├── taskReducer.js    optimistic updates and rollback
+│   ├── ordering.js       fractional board index + renormalisation
+│   ├── outbox.js         durable offline write queue
 │   ├── progress.js       XP, levels, achievements
 │   ├── export.js         JSON / CSV / Markdown
 │   └── ai/               provider transport + offline heuristics
@@ -194,6 +220,11 @@ src/
 │   ├── charts/     validated, theme-aware visualisations
 │   └── layout/     sidebar, theme toggle
 └── routes/         One file per URL
+
+api/                Serverless AI proxy
+e2e/                Playwright suites — stubbed and live
+scripts/            Live-database verification
+supabase/           Schema and migrations
 ```
 
 Two principles hold the codebase together:
@@ -209,7 +240,12 @@ Two principles hold the codebase together:
 Tasks carry `completed_at` alongside `is_completed`, so every metric answers
 "when did this actually get done" rather than inferring it from creation time.
 Board position uses fractional indexing, so moving one card writes one row
-instead of renumbering the column.
+instead of renumbering the column — and renormalises automatically when repeated
+drops into the same gap exhaust float precision.
+
+Writes carry an `updated_at` precondition. If a task changed on another device
+first, the write is rejected rather than silently overwriting it, and you are
+offered the choice.
 
 ---
 
