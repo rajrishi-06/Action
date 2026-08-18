@@ -19,7 +19,18 @@ into a setup screen rather than failing, so you will know immediately.
 npm run check
 ```
 
-That runs lint, tests and a production build — the same gate CI applies.
+That runs the secret check, lint, tests and a production build — the same gate
+CI applies.
+
+### On credentials
+
+`npm run check:secrets` fails the build if a `.env` is tracked or anything
+credential-shaped appears in a tracked file. It exists because a real Supabase
+URL and anon key were committed in this repository's first commit.
+
+That key is still in git history and always will be — **a secret that reaches
+history can only be dealt with by rotating it**, not by deleting the file later.
+If you ever commit one: rotate first, remove second.
 
 ## How the code is organised
 

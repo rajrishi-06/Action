@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Action — a fast, keyboard-first task manager with planning, focus and analytics built in.",
+  "description": "Action \u2014 a fast, keyboard-first task manager with planning, focus and analytics built in.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -14,10 +14,11 @@
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
     "coverage": "vitest run --coverage",
-    "check": "npm run lint && npm run test && npm run build",
+    "check": "npm run check:secrets && npm run lint && npm run test && npm run build",
     "verify:supabase": "node scripts/verify-supabase.mjs",
     "test:e2e": "playwright test",
-    "test:e2e:ui": "playwright test --ui"
+    "test:e2e:ui": "playwright test --ui",
+    "check:secrets": "./scripts/check-secrets.sh"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
