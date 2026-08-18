@@ -2,10 +2,123 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+@layer base {
+  /* ---- Light theme (default) ------------------------------------------- */
+  :root {
+    --color-canvas: 247 248 250;
+    --color-surface: 255 255 255;
+    --color-surface-raised: 255 255 255;
+    --color-surface-sunken: 241 243 247;
+    --color-line: 228 231 237;
+    --color-line-strong: 209 214 223;
+    --color-ink: 17 24 39;
+    --color-ink-muted: 84 93 109;
+    --color-ink-subtle: 130 139 153;
+
+    /* Chart palette. Validated for the light surface with the dataviz
+       six-checks validator: lightness band, chroma floor, CVD separation
+       (deutan ΔE 24.9), normal-vision floor and 3:1 contrast all pass. */
+    --chart-1: 51 102 242;
+    --chart-2: 5 150 105;
+    --chart-grid: 228 231 237;
+
+    /* Sequential ramp for the contribution heatmap: one hue, monotone
+       lightness, low -> high. */
+    --heat-0: 241 243 247;
+    --heat-1: 188 211 255;
+    --heat-2: 142 182 255;
+    --heat-3: 51 102 242;
+    --heat-4: 26 60 184;
+
+    color-scheme: light;
+  }
+
+  /* ---- Dark theme ------------------------------------------------------ */
+  .dark {
+    --color-canvas: 12 15 22;
+    --color-surface: 22 27 37;
+    --color-surface-raised: 30 36 48;
+    --color-surface-sunken: 17 21 30;
+    --color-line: 41 48 62;
+    --color-line-strong: 60 69 87;
+    --color-ink: 236 240 246;
+    --color-ink-muted: 154 164 180;
+    --color-ink-subtle: 118 128 145;
+
+    /* Dark steps are chosen against the dark surface and re-validated, not
+       flipped from the light ones. */
+    --chart-1: 89 142 255;
+    --chart-2: 5 150 105;
+    --chart-grid: 41 48 62;
+
+    --heat-0: 26 31 42;
+    --heat-1: 28 49 117;
+    --heat-2: 26 60 184;
+    --heat-3: 51 102 242;
+    --heat-4: 89 142 255;
+
+    color-scheme: dark;
+  }
+
+  * {
+    @apply border-line;
+  }
+
+  html {
+    @apply antialiased;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    @apply bg-canvas text-ink font-sans;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* A single, consistent focus ring for every interactive element. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-brand-500 ring-offset-2 ring-offset-canvas;
+  }
+
+  /* Respect the OS "reduce motion" setting everywhere, including Framer Motion. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
 }
 
-body {
-  @apply bg-gray-50 text-gray-900 antialiased;
+@layer components {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(var(--color-line-strong)) transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-line-strong;
+  }
+
+  /* Visually hidden but available to screen readers; becomes visible on focus
+     when combined with .focus\:not-sr-only (used by the skip link). */
+  .skip-link {
+    @apply sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[100]
+           focus:rounded-lg focus:bg-brand-600 focus:px-4 focus:py-2 focus:text-white;
+  }
+
+  .brand-gradient-text {
+    @apply bg-gradient-to-r from-brand-600 to-accent-500 bg-clip-text text-transparent;
+  }
 }

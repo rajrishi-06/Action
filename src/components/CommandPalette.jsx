@@ -1,286 +1,297 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { Search, Plus, Calendar, TrendingUp, LogOut, Download } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { AnimatePresence, motion } from 'framer-motion';
+import {
+  BarChart3, CalendarDays, CheckCircle2, Columns3, CornerDownLeft, Download,
+  Inbox, LogOut, Moon, Plus, Search, Settings, Sun, Timer,
+} from 'lucide-react';
+import { createPortal } from 'react-dom';
 import { useTodo } from '../context/TodoContext';
-import { supabase } from '../utils/supabase';
+import { useAuth } from '../context/AuthContext';
+import { useTheme } from '../context/ThemeContext';
+import { useToast } from '../context/ToastContext';
+import { exportTasks } from '../lib/export';
+import { formatDueShort, isOverdue } from '../lib/date';
+import { PRIORITY_META } from '../lib/taskModel';
+import { cn } from '../lib/cn';
+import { Kbd } from './ui/primitives';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 
-export const CommandPalette = ({ isOpen, onClose, onNavigate }) => {
-  const [search, setSearch] = useState('');
-  const [selectedIndex, setSelectedIndex] = useState(0);
-  const { addTask, tasks, setFilter } = useTodo();
+/** Subsequence match, so "anlt" finds "Analytics". */
+function fuzzyScore(haystack, needle) {
+  if (!needle) return 0;
+  const text = haystack.toLowerCase();
+  const query = needle.toLowerCase();
+
+  const exact = text.indexOf(query);
+  if (exact === 0) return 1000;
+  if (exact > 0) return 800 - exact;
+
+  let score = 0;
+  let cursor = 0;
+  for (const char of query) {
+    const index = text.indexOf(char, cursor);
+    if (index === -1) return -1;
+    // Consecutive matches are worth more than scattered ones.
+    score += index === cursor ? 10 : 3;
+    cursor = index + 1;
+  }
+  return score;
+}
+
+/**
+ * Command palette.
+ *
+ * Runs commands *and* searches the user's tasks — the previous version showed a
+ * "Type a command or search tasks…" placeholder but only ever filtered nine
+ * hard-coded commands.
+ */
+export function CommandPalette({ open, onClose }) {
+  // The inner component only exists while the palette is open, so its state
+  // starts fresh on every launch — no effect needed to reset the query.
+  return createPortal(
+    <AnimatePresence>{open && <PaletteDialog onClose={onClose} />}</AnimatePresence>,
+    document.body,
+  );
+}
+
+function PaletteDialog({ onClose }) {
+  const navigate = useNavigate();
+  const { tasks, addTask, toggleTask, setFilter } = useTodo();
+  const { signOut } = useAuth();
+  const { setTheme } = useTheme();
+  const toast = useToast();
+
+  const [query, setQuery] = useState('');
+  const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef(null);
+  const listRef = useRef(null);
+  const panelRef = useRef(null);
 
-  const commands = [
-    {
-      id: 'add-task',
-      label: 'Add New Task',
-      icon: <Plus className="w-4 h-4" />,
-      action: () => {
-        if (search.trim()) {
-          addTask(search);
-          onClose();
-        }
-      },
-      keywords: ['new', 'create', 'add', 'task'],
-    },
-    {
-      id: 'view-analytics',
-      label: 'View Analytics',
-      icon: <TrendingUp className="w-4 h-4" />,
-      action: () => {
-        onNavigate('analytics');
-        onClose();
-      },
-      keywords: ['analytics', 'stats', 'dashboard'],
-    },
-    {
-      id: 'show-all',
-      label: 'Show All Tasks',
-      icon: <Calendar className="w-4 h-4" />,
-      action: () => {
-        setFilter('all');
-        onNavigate('list');
-        onClose();
-      },
-      keywords: ['all', 'tasks', 'list'],
-    },
-    {
-      id: 'show-active',
-      label: 'Show Active Tasks',
-      icon: <Calendar className="w-4 h-4" />,
-      action: () => {
-        setFilter('active');
-        onNavigate('list');
-        onClose();
-      },
-      keywords: ['active', 'pending', 'todo'],
-    },
-    {
-      id: 'export-json',
-      label: 'Export as JSON',
-      icon: <Download className="w-4 h-4" />,
-      action: () => {
-        exportData('json');
-        onClose();
-      },
-      keywords: ['export', 'download', 'json'],
-    },
-    {
-      id: 'export-csv',
-      label: 'Export as CSV',
-      icon: <Download className="w-4 h-4" />,
-      action: () => {
-        exportData('csv');
-        onClose();
-      },
-      keywords: ['export', 'download', 'csv'],
-    },
-    {
-      id: 'export-markdown',
-      label: 'Export as Markdown',
-      icon: <Download className="w-4 h-4" />,
-      action: () => {
-        exportData('markdown');
-        onClose();
-      },
-      keywords: ['export', 'download', 'markdown', 'md'],
-    },
-    {
-      id: 'logout',
-      label: 'Sign Out',
-      icon: <LogOut className="w-4 h-4" />,
-      action: async () => {
-        await supabase.auth.signOut();
-        onClose();
-      },
-      keywords: ['logout', 'signout', 'exit'],
-    },
-  ];
+  useFocusTrap(panelRef, true);
 
-  const exportData = (format) => {
-    if (format === 'json') {
-      const dataStr = JSON.stringify(tasks, null, 2);
-      const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr);
-      const exportFileDefaultName = `tasks-${new Date().toISOString().split('T')[0]}.json`;
-      
-      const linkElement = document.createElement('a');
-      linkElement.setAttribute('href', dataUri);
-      linkElement.setAttribute('download', exportFileDefaultName);
-      linkElement.click();
-    } else if (format === 'csv') {
-      const headers = ['Title', 'Completed', 'Priority', 'Due Date', 'Tags'];
-      const rows = tasks.map(t => [
-        t.title,
-        t.completed ? 'Yes' : 'No',
-        t.priority,
-        t.dueDate ? new Date(t.dueDate).toISOString() : '',
-        (t.tags || []).join(';'),
-      ]);
-      
-      const csvContent = [
-        headers.join(','),
-        ...rows.map(row => row.map(cell => `"${cell}"`).join(',')),
-      ].join('\n');
-      
-      const dataUri = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csvContent);
-      const exportFileDefaultName = `tasks-${new Date().toISOString().split('T')[0]}.csv`;
-      
-      const linkElement = document.createElement('a');
-      linkElement.setAttribute('href', dataUri);
-      linkElement.setAttribute('download', exportFileDefaultName);
-      linkElement.click();
-    } else if (format === 'markdown') {
-      // Generate Markdown format
-      const completedTasks = tasks.filter(t => t.completed);
-      const activeTasks = tasks.filter(t => !t.completed);
-      
-      const mdContent = `# Task List Export
-**Generated:** ${new Date().toLocaleString()}
-**Total Tasks:** ${tasks.length}
-**Completed:** ${completedTasks.length}
-**Active:** ${activeTasks.length}
+  // Focus the field once the panel has mounted and begun animating in.
+  useEffect(() => {
+    const timer = setTimeout(() => inputRef.current?.focus(), 20);
+    return () => clearTimeout(timer);
+  }, []);
 
----
+  const commands = useMemo(
+    () => [
+      { id: 'go-today', group: 'Navigate', label: 'Go to Today', icon: Sun, keywords: 'today home', run: () => navigate('/app/today') },
+      { id: 'go-upcoming', group: 'Navigate', label: 'Go to Upcoming', icon: CalendarDays, keywords: 'upcoming later', run: () => navigate('/app/upcoming') },
+      { id: 'go-all', group: 'Navigate', label: 'Go to All tasks', icon: Inbox, keywords: 'all inbox everything', run: () => navigate('/app/all') },
+      { id: 'go-board', group: 'Navigate', label: 'Go to Board', icon: Columns3, keywords: 'kanban board columns', run: () => navigate('/app/board') },
+      { id: 'go-calendar', group: 'Navigate', label: 'Go to Calendar', icon: CalendarDays, keywords: 'calendar month schedule', run: () => navigate('/app/calendar') },
+      { id: 'go-focus', group: 'Navigate', label: 'Go to Focus timer', icon: Timer, keywords: 'focus pomodoro timer', run: () => navigate('/app/focus') },
+      { id: 'go-analytics', group: 'Navigate', label: 'Go to Insights', icon: BarChart3, keywords: 'analytics stats insights charts', run: () => navigate('/app/analytics') },
+      { id: 'go-settings', group: 'Navigate', label: 'Go to Settings', icon: Settings, keywords: 'settings preferences account', run: () => navigate('/app/settings') },
 
-## 📋 Active Tasks
+      { id: 'filter-overdue', group: 'Filter', label: 'Show overdue tasks', icon: CheckCircle2, keywords: 'overdue late slipped', run: () => { setFilter({ scope: 'all' }); navigate('/app/all'); } },
 
-${activeTasks.length > 0 ? activeTasks.map(t => {
-  const priority = t.priority ? `**[${t.priority.toUpperCase()}]**` : '';
-  const tags = t.tags && t.tags.length > 0 ? t.tags.map(tag => `\`${tag}\``).join(' ') : '';
-  const dueDate = t.dueDate ? `\n  - Due: ${new Date(t.dueDate).toLocaleDateString()}` : '';
-  const subtasks = t.subtasks && t.subtasks.length > 0 
-    ? '\n' + t.subtasks.map(st => `  - [${st.completed ? 'x' : ' '}] ${st.title}`).join('\n')
-    : '';
-  
-  return `### [ ] ${t.title}\n${priority ? `  ${priority}` : ''}${tags ? `  ${tags}` : ''}${dueDate}${subtasks}`;
-}).join('\n\n') : '_No active tasks_'}
+      { id: 'theme-light', group: 'Theme', label: 'Switch to light theme', icon: Sun, keywords: 'light theme bright', run: () => setTheme('light') },
+      { id: 'theme-dark', group: 'Theme', label: 'Switch to dark theme', icon: Moon, keywords: 'dark theme night', run: () => setTheme('dark') },
 
----
+      { id: 'export-json', group: 'Export', label: 'Export tasks as JSON', icon: Download, keywords: 'export download json backup', run: () => toast.success(`Exported as ${exportTasks(tasks, 'json')}`) },
+      { id: 'export-csv', group: 'Export', label: 'Export tasks as CSV', icon: Download, keywords: 'export download csv spreadsheet', run: () => toast.success(`Exported as ${exportTasks(tasks, 'csv')}`) },
+      { id: 'export-md', group: 'Export', label: 'Export tasks as Markdown', icon: Download, keywords: 'export download markdown md', run: () => toast.success(`Exported as ${exportTasks(tasks, 'markdown')}`) },
 
-## ✅ Completed Tasks
+      { id: 'sign-out', group: 'Account', label: 'Sign out', icon: LogOut, keywords: 'sign out logout leave', run: signOut },
+    ],
+    [navigate, setFilter, setTheme, tasks, toast, signOut],
+  );
 
-${completedTasks.length > 0 ? completedTasks.map(t => {
-  const tags = t.tags && t.tags.length > 0 ? t.tags.map(tag => `\`${tag}\``).join(' ') : '';
-  return `### [x] ${t.title}${tags ? `\n  ${tags}` : ''}`;
-}).join('\n\n') : '_No completed tasks_'}
+  const results = useMemo(() => {
+    const trimmed = query.trim();
 
----
+    const matchedCommands = (
+      trimmed
+        ? commands
+            .map((command) => ({
+              ...command,
+              score: Math.max(fuzzyScore(command.label, trimmed), fuzzyScore(command.keywords, trimmed) - 50),
+            }))
+            .filter((command) => command.score > 0)
+            .sort((a, b) => b.score - a.score)
+        : commands
+    ).slice(0, trimmed ? 6 : commands.length);
 
-*Exported from TaskMaster*`;
+    const matchedTasks = trimmed
+      ? tasks
+          .map((task) => ({ task, score: fuzzyScore(task.title, trimmed) }))
+          .filter((entry) => entry.score > 0)
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 6)
+          .map(({ task }) => ({
+            id: `task:${task.id}`,
+            group: 'Tasks',
+            label: task.title,
+            task,
+            run: () => toggleTask(task.id),
+          }))
+      : [];
 
-      const dataUri = 'data:text/markdown;charset=utf-8,' + encodeURIComponent(mdContent);
-      const exportFileDefaultName = `tasks-${new Date().toISOString().split('T')[0]}.md`;
-      
-      const linkElement = document.createElement('a');
-      linkElement.setAttribute('href', dataUri);
-      linkElement.setAttribute('download', exportFileDefaultName);
-      linkElement.click();
+    const createOption =
+      trimmed.length >= 2
+        ? [{
+            id: 'create',
+            group: 'Create',
+            label: `Add task “${trimmed}”`,
+            icon: Plus,
+            run: async () => {
+              await addTask(trimmed);
+              toast.success('Task added');
+            },
+          }]
+        : [];
+
+    return [...createOption, ...matchedTasks, ...matchedCommands];
+  }, [query, commands, tasks, addTask, toggleTask, toast]);
+
+  // Keep the selection inside the result list as it shrinks.
+  const safeIndex = Math.min(activeIndex, Math.max(results.length - 1, 0));
+
+  const runActive = () => {
+    const item = results[safeIndex];
+    if (!item) return;
+    item.run();
+    onClose();
+  };
+
+  const handleKeyDown = (event) => {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setActiveIndex((current) => (current + 1) % Math.max(results.length, 1));
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setActiveIndex((current) => (current - 1 + results.length) % Math.max(results.length, 1));
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      runActive();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      onClose();
     }
   };
 
-  const filteredCommands = commands.filter(cmd =>
-    cmd.label.toLowerCase().includes(search.toLowerCase()) ||
-    cmd.keywords.some(kw => kw.includes(search.toLowerCase()))
-  );
-
+  // Keep the highlighted row scrolled into view when navigating by keyboard.
   useEffect(() => {
-    if (isOpen && inputRef.current) {
-      inputRef.current.focus();
-    }
-  }, [isOpen]);
+    listRef.current
+      ?.querySelector(`[data-index="${safeIndex}"]`)
+      ?.scrollIntoView({ block: 'nearest' });
+  }, [safeIndex]);
 
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (!isOpen) return;
-
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setSelectedIndex(prev => (prev + 1) % filteredCommands.length);
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setSelectedIndex(prev => (prev - 1 + filteredCommands.length) % filteredCommands.length);
-      } else if (e.key === 'Enter') {
-        e.preventDefault();
-        if (filteredCommands[selectedIndex]) {
-          filteredCommands[selectedIndex].action();
-        }
-      }
-    };
-
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, selectedIndex, filteredCommands]);
-
-  if (!isOpen) return null;
+  let lastGroup = null;
 
   return (
-    <AnimatePresence>
+    <div className="fixed inset-0 z-[70] flex items-start justify-center p-4 pt-[12vh]">
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-start justify-center pt-32"
+        transition={{ duration: 0.12 }}
+        className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm"
         onClick={onClose}
+        aria-hidden="true"
+      />
+      <motion.div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command palette"
+        initial={{ opacity: 0, scale: 0.98, y: -8 }}
+        animate={{ opacity: 1, scale: 1, y: 0 }}
+        exit={{ opacity: 0, scale: 0.98, y: -8 }}
+        transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
+        className="relative z-10 w-full max-w-xl overflow-hidden rounded-2xl border border-line bg-surface-raised shadow-pop"
       >
-        <motion.div
-          initial={{ scale: 0.95, y: -20 }}
-          animate={{ scale: 1, y: 0 }}
-          exit={{ scale: 0.95, y: -20 }}
-          onClick={(e) => e.stopPropagation()}
-          className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-2xl border border-gray-200 dark:border-gray-700 overflow-hidden"
+        <div className="flex items-center gap-3 border-b border-line px-4">
+          <Search className="h-4 w-4 flex-shrink-0 text-ink-subtle" aria-hidden="true" />
+          <input
+            ref={inputRef}
+            value={query}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setActiveIndex(0);
+            }}
+            onKeyDown={handleKeyDown}
+            placeholder="Search tasks or run a command…"
+            aria-label="Search tasks or run a command"
+            aria-controls="command-results"
+            aria-activedescendant={results[safeIndex] ? `command-${safeIndex}` : undefined}
+            className="h-14 min-w-0 flex-1 bg-transparent text-[15px] text-ink outline-none placeholder:text-ink-subtle"
+          />
+          <Kbd>Esc</Kbd>
+        </div>
+
+        <div
+          id="command-results"
+          ref={listRef}
+          role="listbox"
+          aria-label="Results"
+          className="max-h-[22rem] overflow-y-auto p-2 scrollbar-thin"
         >
-          <div className="flex items-center gap-3 p-4 border-b border-gray-200 dark:border-gray-700">
-            <Search className="w-5 h-5 text-gray-400" />
-            <input
-              ref={inputRef}
-              type="text"
-              value={search}
-              onChange={(e) => {
-                setSearch(e.target.value);
-                setSelectedIndex(0);
-              }}
-              placeholder="Type a command or search tasks..."
-              className="flex-1 bg-transparent outline-none text-gray-800 dark:text-white placeholder-gray-400"
-            />
-            <kbd className="px-2 py-1 bg-gray-100 dark:bg-gray-700 rounded text-xs text-gray-600 dark:text-gray-400">
-              ESC
-            </kbd>
-          </div>
+          {results.length === 0 ? (
+            <p className="px-3 py-10 text-center text-sm text-ink-muted">
+              Nothing matches “{query}”.
+            </p>
+          ) : (
+            results.map((item, index) => {
+              const showGroup = item.group !== lastGroup;
+              lastGroup = item.group;
+              const Icon = item.icon;
+              const priority = item.task ? PRIORITY_META[item.task.priority] : null;
 
-          <div className="max-h-96 overflow-y-auto">
-            {filteredCommands.length === 0 ? (
-              <div className="p-8 text-center text-gray-400">
-                No commands found
-              </div>
-            ) : (
-              <div className="py-2">
-                {filteredCommands.map((cmd, index) => (
+              return (
+                <div key={item.id}>
+                  {showGroup && (
+                    <p className="px-2 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wide text-ink-subtle">
+                      {item.group}
+                    </p>
+                  )}
                   <button
-                    key={cmd.id}
-                    onClick={() => cmd.action()}
-                    className={`w-full flex items-center gap-3 px-4 py-3 transition-colors ${
-                      index === selectedIndex
-                        ? 'bg-indigo-50 dark:bg-indigo-900/20 text-indigo-600'
-                        : 'text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700'
-                    }`}
+                    type="button"
+                    id={`command-${index}`}
+                    data-index={index}
+                    role="option"
+                    aria-selected={index === safeIndex}
+                    onClick={() => {
+                      item.run();
+                      onClose();
+                    }}
+                    onMouseMove={() => setActiveIndex(index)}
+                    className={cn(
+                      'flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left text-sm transition-colors',
+                      index === safeIndex ? 'bg-brand-50 text-brand-800 dark:bg-brand-950/60 dark:text-brand-200' : 'text-ink',
+                    )}
                   >
-                    {cmd.icon}
-                    <span>{cmd.label}</span>
+                    {item.task ? (
+                      <span className={cn('h-2 w-2 flex-shrink-0 rounded-full', priority.dot)} aria-hidden="true" />
+                    ) : (
+                      Icon && <Icon className="h-4 w-4 flex-shrink-0 text-ink-subtle" aria-hidden="true" />
+                    )}
+                    <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                    {item.task?.dueDate && (
+                      <span className={cn('flex-shrink-0 text-xs', isOverdue(item.task) ? 'text-rose-500' : 'text-ink-subtle')}>
+                        {formatDueShort(item.task.dueDate)}
+                      </span>
+                    )}
+                    {index === safeIndex && <CornerDownLeft className="h-3.5 w-3.5 flex-shrink-0 text-ink-subtle" />}
                   </button>
-                ))}
-              </div>
-            )}
-          </div>
+                </div>
+              );
+            })
+          )}
+        </div>
 
-          <div className="p-3 border-t border-gray-200 dark:border-gray-700 text-xs text-gray-500 flex items-center justify-between">
-            <div className="flex gap-4">
-              <span><kbd className="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-700 rounded">↑↓</kbd> Navigate</span>
-              <span><kbd className="px-1.5 py-0.5 bg-gray-100 dark:bg-gray-700 rounded">↵</kbd> Select</span>
-            </div>
-            <span>Cmd+K to open</span>
-          </div>
-        </motion.div>
+        <div className="flex items-center justify-between border-t border-line px-4 py-2.5 text-xs text-ink-subtle">
+          <span className="flex items-center gap-3">
+            <span className="flex items-center gap-1"><Kbd>↑</Kbd><Kbd>↓</Kbd> navigate</span>
+            <span className="flex items-center gap-1"><Kbd>↵</Kbd> select</span>
+          </span>
+          <span>Tasks toggle complete when selected</span>
+        </div>
       </motion.div>
-    </AnimatePresence>
+    </div>
   );
-};
+}
